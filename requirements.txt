@@ -1,0 +1,7 @@
+google-generativeai
+pymongo
+gspread
+oauth2client
+PyPDF2
+requests
+gdown
