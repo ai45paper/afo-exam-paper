@@ -136,10 +136,11 @@ def main():
     pdf_filename = "book.pdf"
     if not os.path.exists(pdf_filename):
         print("📥 Downloading Book...")
-        # यहाँ URL को एकदम साफ रखा गया है
+        # URL को पूरी तरह से क्लीन कर दिया गया है
         url = f'[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){DRIVE_FILE_ID}'
         try:
-            gdown.download(url, pdf_filename, quiet=False, fuzzy=True)
+            # fuzzy=True हटा दिया गया है
+            gdown.download(url, pdf_filename, quiet=False)
             print("✅ Download Complete.")
         except Exception as e:
             print(f"❌ Download Failed: {e}")
