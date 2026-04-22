@@ -3,6 +3,8 @@ import sys
 import json
 import time
 import re
+from datetime import datetime, timedelta
+import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
@@ -44,7 +46,7 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 2. RESET (only if page == 0)
+# 2. RESET (ONLY ONCE)
 # ==========================================
 def get_current_page():
     try:
@@ -62,14 +64,25 @@ def reset_and_start_fresh():
     progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": 0}}, upsert=True)
     if 'questions_db' in db.list_collection_names():
         db['questions_db'].drop()
-        print("✅ Dropped old questions from MongoDB")
     sheet.clear()
     sheet.append_row(["Section", "Question", "Option1", "Option2", "Option3", "Option4", "Option5", "Answer"])
-    print("✅ Cleared Google Sheets and added header row")
     print("✅ Reset complete. Starting from page 0.")
 
 # ==========================================
-# 3. GLOBAL GEMINI CLIENT (reused)
+# 3. WAIT UNTIL 5:30 AM IST
+# ==========================================
+def wait_until_5_30_am_ist():
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+    target = now.replace(hour=5, minute=30, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    wait_seconds = (target - now).total_seconds()
+    print(f"⏰ Waiting until {target.strftime('%Y-%m-%d %H:%M:%S')} IST ({wait_seconds/3600:.1f} hours)")
+    time.sleep(wait_seconds)
+
+# ==========================================
+# 4. GEMINI CLIENT (REUSED)
 # ==========================================
 current_key_index = -1
 gemini_client = None
@@ -80,11 +93,11 @@ def get_gemini_client(key_index):
         current_key_index = key_index
         key = GEMINI_KEYS[key_index % len(GEMINI_KEYS)].strip()
         gemini_client = genai.Client(api_key=key)
-        print(f"🔑 Initialized client with key index {key_index % len(GEMINI_KEYS)}")
+        print(f"🔑 Using key index {key_index % len(GEMINI_KEYS)}")
     return gemini_client
 
 # ==========================================
-# 4. PDF TEXT EXTRACTION
+# 5. PDF EXTRACTION (3 PAGES)
 # ==========================================
 def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     if not os.path.exists(pdf_path):
@@ -94,7 +107,7 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     if start_page >= total_pages:
         return None
     actual_end = min(end_page, total_pages)
-    print(f"📖 Reading pages {start_page} to {actual_end} (total pages: {total_pages})")
+    print(f"📖 Reading pages {start_page} to {actual_end} (total {total_pages})")
     text = ""
     for i in range(start_page, actual_end):
         try:
@@ -106,31 +119,28 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text.strip() if text.strip() else ""
 
 # ==========================================
-# 5. AI GENERATION – 4 REAL MODELS + FULL QUESTION BRAIN
+# 6. AI GENERATION – 4 MODELS, 36 ATTEMPTS
 # ==========================================
-REAL_MODELS = [
+MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro"
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite"
 ]
 
 def generate_questions(text_chunk, key_attempt=0, model_attempt=0):
-    # Limit text to 6000 chars to save quota
-    truncated_text = text_chunk[:6000]
+    truncated = text_chunk[:6000]
     
-    # FULL QUESTION BRAIN (21 examples as provided by user)
     prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO.
 Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
 
 CRITICAL RULES:
-1. Level: MODERATE (conceptual and professional).
-2. Questions MUST be 2 to 3 lines long. DO NOT use phrases like "According to the text".
-3. Return ONLY a valid JSON list. No code blocks, no markdown, no text explanations.
-4. Provide exactly 5 options (opt1 to opt5).
-5. Section Detection: Detect the subject (Agronomy, Soil Science, Horticulture, Genetics, etc.).
+- Questions MUST be 2-3 lines long. Do NOT use "According to the text".
+- Return ONLY valid JSON list (no markdown, no extra text).
+- Each object: section, question, opt1, opt2, opt3, opt4, opt5, answer.
+- Section should be subject (Agronomy, Soil Science, Horticulture, Genetics, etc.).
 
-STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT):
+STYLE EXAMPLES (match this tone exactly):
 - "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
 - "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
 - "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
@@ -153,21 +163,23 @@ STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT):
 - "The conversion of nitrite or nitrate into gaseous nitrogen during the nitrogen cycle is known as what process?"
 - "The certification tag colour associated with Foundation Seed under seed certification standards is which of the following?"
 
-JSON Template:
+You MUST generate at least 15 questions, maximum 20.
+
+Text source:
+{truncated}
+
+JSON template:
 [
   {{
     "section": "Agronomy",
-    "question": "Question text...",
-    "opt1": "Choice A", "opt2": "Choice B", "opt3": "Choice C", "opt4": "Choice D", "opt5": "Choice E",
-    "answer": "Correct Choice"
+    "question": "...",
+    "opt1": "...", "opt2": "...", "opt3": "...", "opt4": "...", "opt5": "...",
+    "answer": "..."
   }}
-]
+]"""
 
-Text Source:
-{truncated_text}
-"""
-    for m_idx in range(model_attempt, len(REAL_MODELS)):
-        model = REAL_MODELS[m_idx]
+    for m_idx in range(model_attempt, len(MODELS)):
+        model = MODELS[m_idx]
         try:
             client = get_gemini_client(key_attempt)
             response = client.models.generate_content(model=model, contents=prompt)
@@ -177,42 +189,71 @@ Text Source:
             if not isinstance(questions, list):
                 questions = [questions]
             if len(questions) < 15:
-                print(f"⚠️ Only {len(questions)} questions – retrying same model (need 15+)")
-                time.sleep(10)
+                print(f"⚠️ Only {len(questions)} questions, retrying same model...")
+                time.sleep(60)  # 1 min gap for retry same model
                 return generate_questions(text_chunk, key_attempt, m_idx)
             print(f"✅ Generated {len(questions)} questions using {model}")
-            return questions[:20]  # cap at 20
+            return questions[:20]
         except Exception as e:
-            error_str = str(e)
-            print(f"⚠️ {model} failed: {error_str[:200]}")
-            if "429" in error_str or "503" in error_str:
-                print("⏳ Quota/overload. Waiting 60s then next model...")
+            err = str(e)
+            print(f"⚠️ {model} failed: {err[:150]}")
+            if "429" in err or "503" in err:
+                print("⏳ Quota/overload. Waiting 60s then next key...")
                 time.sleep(60)
-                continue
+                # Move to next key, reset model index
+                if key_attempt + 1 < len(GEMINI_KEYS) * len(MODELS):
+                    return generate_questions(text_chunk, key_attempt + 1, 0)
+                else:
+                    # All 36 attempts exhausted
+                    print("🚨 All 36 attempts failed due to quota. Waiting 1 hour...")
+                    time.sleep(3600)
+                    # After 1 hour, if still quota issue, wait until 5:30 AM IST
+                    print("⏳ Checking if quota reset...")
+                    # Try one more time with first key and first model
+                    try:
+                        test_client = get_gemini_client(0)
+                        test_client.models.generate_content(model=MODELS[0], contents="test")
+                    except Exception as test_err:
+                        if "429" in str(test_err):
+                            print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
+                            wait_until_5_30_am_ist()
+                    return generate_questions(text_chunk, 0, 0)
+            # For other errors (404, etc.) wait 10s then next model within same key
             print("⏳ Waiting 10s then next model...")
             time.sleep(10)
             continue
 
-    # All models tried with this key -> switch key
-    if key_attempt + 1 < len(GEMINI_KEYS) * len(REAL_MODELS):
-        print(f"🔄 All models failed with key index {key_attempt % len(GEMINI_KEYS)}. Switching to next key.")
-        time.sleep(60)
+    # All models tried with this key -> next key
+    if key_attempt + 1 < len(GEMINI_KEYS) * len(MODELS):
+        print(f"🔄 Switching to next key (total attempts {key_attempt+1})")
+        time.sleep(60)  # 1 min gap before switching key
         return generate_questions(text_chunk, key_attempt + 1, 0)
     else:
-        print("🚨 All 36 attempts (9 keys × 4 models) exhausted. Waiting 1 hour.")
+        # All 36 attempts exhausted
+        print("🚨 All 36 attempts failed. Waiting 1 hour...")
         time.sleep(3600)
+        # After 1 hour, try again; if still 429, wait until 5:30 AM
+        try:
+            test_client = get_gemini_client(0)
+            test_client.models.generate_content(model=MODELS[0], contents="test")
+        except Exception as test_err:
+            if "429" in str(test_err):
+                print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
+                wait_until_5_30_am_ist()
         return generate_questions(text_chunk, 0, 0)
 
 # ==========================================
-# 6. MAIN LOOP
+# 7. MAIN LOOP
 # ==========================================
 def main():
     keep_alive()
     print("🚀 Agri-Bot System Initiated.")
     
-    # Only reset if current_page == 0 (fresh start) – not on every restart
-    if get_current_page() == 0:
+    marker = "reset_done.marker"
+    if not os.path.exists(marker):
         reset_and_start_fresh()
+        with open(marker, "w") as f:
+            f.write("done")
     else:
         print(f"✅ Resuming from page {get_current_page()} (no reset)")
     
@@ -230,9 +271,11 @@ def main():
         print(f"✅ PDF exists: {pdf}")
     
     print("\n" + "="*60)
-    print("📖 STARTING PROCESSING (3 pages/chunk, 15–20 questions)")
-    print("📋 Fallback: 4 real models × 9 keys = 36 attempts per chunk")
-    print("⏱️ Model gap: 10s (60s for 429) | Key switch gap: 60s")
+    print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
+    print("📋 Models: 2.0-flash, 2.0-lite, 2.5-flash, 2.5-lite")
+    print("🔁 Total attempts per chunk: 9 keys × 4 models = 36")
+    print("⏱️ Each attempt gap: 60s (on quota) or 10s (other errors)")
+    print("🚨 After 36 fails: wait 1h, then if still 429 wait until 5:30 AM IST")
     print("="*60 + "\n")
     
     total_q = 0
