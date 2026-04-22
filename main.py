@@ -218,25 +218,26 @@ def main():
     
     pdf_filename = "book.pdf"
     
-    # Secure Download Block (URL Format Fixed)
-    if not os.path.exists(pdf_filename):
-        print("📥 Starting Secure Book Download...")
-        try:
-            clean_id = DRIVE_FILE_ID.strip()
-download_url = f"https://drive.google.com/uc?id={clean_id}"
-            
-            print(f"📍 Download URL: {download_url}")
-            
-            gdown.download(download_url, pdf_filename, quiet=False)
-            
-            if os.path.exists(pdf_filename):
-                file_size = os.path.getsize(pdf_filename)
-                print(f"✅ Book Downloaded Successfully. Size: {file_size} bytes")
-            else:
-                raise Exception("File not found after download attempt.")
-        except Exception as e:
-            print(f"❌ CRITICAL ERROR: Download Failed! -> {e}")
-            return
+ # Secure Download Block (URL Format Fixed)
+if not os.path.exists(pdf_filename):
+    print("📥 Starting Secure Book Download...")
+
+    try:
+        clean_id = DRIVE_FILE_ID.strip()
+        download_url = f"https://drive.google.com/uc?id={clean_id}"
+
+        print(f"📍 Download URL: {download_url}")
+
+        gdown.download(download_url, pdf_filename, quiet=False)
+
+        if os.path.exists(pdf_filename):
+            file_size = os.path.getsize(pdf_filename)
+            print(f"✅ Book Downloaded Successfully. Size: {file_size} bytes")
+        else:
+            raise Exception("File not found after download attempt.")
+
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: Download Failed! -> {e}")
 
     # Process Pages
     page_count = 0
