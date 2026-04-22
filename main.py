@@ -8,7 +8,13 @@ from pymongo import MongoClient
 from google import genai
 import pypdf
 import gdown
-from keep_alive import keep_alive
+
+# Optional keep_alive – define dummy if file missing
+try:
+    from keep_alive import keep_alive
+except ImportError:
+    def keep_alive():
+        pass
 
 # ==========================================
 # 1. CONFIGURATION & ENVIRONMENT SETUP
@@ -87,7 +93,6 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
             print(f"❌ File not found: {pdf_path}")
             return ""
         
-        # 117MB फाइल के लिए pypdf का उपयोग
         reader = pypdf.PdfReader(pdf_path)
         total_pages = len(reader.pages)
         
@@ -110,7 +115,7 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text if text.strip() else ""
 
 # ==========================================
-# 3. AI GENERATION LOGIC (WITH FULL 21-QUESTION BRAIN)
+# 3. AI GENERATION LOGIC (UPDATED MODELS)
 # ==========================================
 def generate_questions(text_chunk, key_attempt=0):
     try:
@@ -164,8 +169,8 @@ Text Source:
 {text_chunk}
 """
         
-        # Model Fallback (2.5 -> 2.0 -> 1.5)
-        models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+        # Use only existing Gemini models
+        models_to_try = ['gemini-1.5-flash', 'gemini-2.0-flash']
         response_text = None
         
         for model_name in models_to_try:
@@ -210,7 +215,7 @@ Text Source:
             return generate_questions(text_chunk, 0)
 
 # ==========================================
-# 4. MAIN ENGINE
+# 4. MAIN ENGINE (FIXED INDENTATION)
 # ==========================================
 def main():
     keep_alive()
@@ -218,26 +223,22 @@ def main():
     
     pdf_filename = "book.pdf"
     
- # Secure Download Block (URL Format Fixed)
-if not os.path.exists(pdf_filename):
-    print("📥 Starting Secure Book Download...")
-
-    try:
-        clean_id = DRIVE_FILE_ID.strip()
-        download_url = f"https://drive.google.com/uc?id={clean_id}"
-
-        print(f"📍 Download URL: {download_url}")
-
-        gdown.download(download_url, pdf_filename, quiet=False)
-
-        if os.path.exists(pdf_filename):
-            file_size = os.path.getsize(pdf_filename)
-            print(f"✅ Book Downloaded Successfully. Size: {file_size} bytes")
-        else:
-            raise Exception("File not found after download attempt.")
-
-    except Exception as e:
-        print(f"❌ CRITICAL ERROR: Download Failed! -> {e}")
+    # Secure Download Block
+    if not os.path.exists(pdf_filename):
+        print("📥 Starting Secure Book Download...")
+        try:
+            clean_id = DRIVE_FILE_ID.strip()
+            download_url = f"https://drive.google.com/uc?id={clean_id}"
+            print(f"📍 Download URL: {download_url}")
+            gdown.download(download_url, pdf_filename, quiet=False)
+            if os.path.exists(pdf_filename):
+                file_size = os.path.getsize(pdf_filename)
+                print(f"✅ Book Downloaded Successfully. Size: {file_size} bytes")
+            else:
+                raise Exception("File not found after download attempt.")
+        except Exception as e:
+            print(f"❌ CRITICAL ERROR: Download Failed! -> {e}")
+            return  # Stop execution if PDF missing
 
     # Process Pages
     page_count = 0
@@ -261,8 +262,10 @@ if not os.path.exists(pdf_filename):
                 
                 if questions and len(questions) > 0:
                     try:
+                        # Save to MongoDB
                         questions_collection.insert_many(questions)
                         
+                        # Prepare data for Google Sheets
                         sheet_data = []
                         for q in questions:
                             sheet_data.append([
@@ -276,14 +279,19 @@ if not os.path.exists(pdf_filename):
                         print(f"✅ Success: {len(questions)} items added to Sheet.")
                         page_count += len(questions)
                         error_count = 0
+                        
+                        # ✅ ONLY update page tracker on success
+                        update_current_page(next_page)
                     except Exception as sheet_error:
                         print(f"❌ Sheet Update Error: {sheet_error}")
                         error_count += 1
                         if error_count >= MAX_ERRORS:
                             print("🚨 Too many errors. Stopping execution.")
                             break
+            else:
+                # Not enough text – still advance to avoid infinite loop
+                update_current_page(next_page)
             
-            update_current_page(next_page)
             print("⏳ Pause for 2 minutes (Protecting Tokens)...")
             time.sleep(120)
             
