@@ -25,7 +25,6 @@ SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
-# OpenRouter Free Models (correct IDs without :free)
 OPENROUTER_MODELS = [
     "deepseek/deepseek-r1",
     "deepseek/deepseek-chat",
@@ -33,7 +32,6 @@ OPENROUTER_MODELS = [
     "meta-llama/llama-3-70b-instruct"
 ]
 
-# Gemini Working Models
 GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite"
@@ -46,14 +44,14 @@ if not MONGO_URI:
 if not SERVICE_ACCOUNT_JSON:
     raise ValueError("❌ SERVICE_ACCOUNT_JSON not set")
 
-# Remove empty strings from keys
 OPENROUTER_KEYS = [k.strip() for k in OPENROUTER_KEYS if k.strip()]
 GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS if k.strip()]
 
 # MongoDB
-client = MongoClient(MONGO_URI)
-db = client['agri_data_bank']
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client['agri_data_bank']
 progress_collection = db['process_tracker']
+config_collection = db['config']  # for storing reset flag
 print("✅ MongoDB Connection: SUCCESS")
 
 # Google Sheets
@@ -65,8 +63,15 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 2. RESET (ONLY ONCE)
+# 2. RESET (ONLY ONCE – using MongoDB flag)
 # ==========================================
+def is_reset_done():
+    doc = config_collection.find_one({"_id": "reset_flag"})
+    return doc.get("done", False) if doc else False
+
+def mark_reset_done():
+    config_collection.update_one({"_id": "reset_flag"}, {"$set": {"done": True}}, upsert=True)
+
 def get_current_page():
     try:
         tracker = progress_collection.find_one({"_id": "pdf_tracker"})
@@ -86,6 +91,7 @@ def reset_and_start_fresh():
     sheet.clear()
     sheet.append_row(["Section", "Question", "Option1", "Option2", "Option3", "Option4", "Option5", "Answer"])
     print("✅ Reset complete. Starting from page 0.")
+    mark_reset_done()
 
 # ==========================================
 # 3. WAIT UNTIL 5:30 AM IST
@@ -204,7 +210,7 @@ def generate_questions(text_chunk):
     max_attempts = (len(OPENROUTER_KEYS) * len(OPENROUTER_MODELS) +
                     len(GEMINI_KEYS) * len(GEMINI_MODELS))
 
-    # ---------- LAYER 1: OPENROUTER ----------
+    # Layer 1: OpenRouter
     if OPENROUTER_KEYS:
         print(f"🌐 Trying OpenRouter layer ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS)} attempts)")
         for key_idx, api_key in enumerate(OPENROUTER_KEYS):
@@ -229,7 +235,7 @@ def generate_questions(text_chunk):
                     time.sleep(60)
                     continue
 
-    # ---------- LAYER 2: GEMINI ----------
+    # Layer 2: Gemini
     print(f"🤖 OpenRouter layer exhausted. Switching to Gemini layer ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts)")
     for key_idx, api_key in enumerate(GEMINI_KEYS):
         for model in GEMINI_MODELS:
@@ -260,10 +266,9 @@ def generate_questions(text_chunk):
                 time.sleep(10)
                 continue
 
-    # ---------- ALL ATTEMPTS EXHAUSTED ----------
+    # All attempts exhausted
     print(f"🚨 All {max_attempts} attempts exhausted. Waiting 1 hour...")
     time.sleep(3600)
-    # Test if Gemini quota still exhausted
     try:
         test_client = genai.Client(api_key=GEMINI_KEYS[0])
         test_client.models.generate_content(model=GEMINI_MODELS[0], contents="test")
@@ -271,7 +276,7 @@ def generate_questions(text_chunk):
         if "429" in str(test_err):
             print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
             wait_until_5_30_am_ist()
-    return generate_questions(text_chunk)  # Retry recursively
+    return generate_questions(text_chunk)
 
 # ==========================================
 # 8. MAIN LOOP
@@ -280,13 +285,11 @@ def main():
     keep_alive()
     print("🚀 Agri-Bot System Initiated.")
     
-    marker = "reset_done.marker"
-    if not os.path.exists(marker):
+    # Reset only once – using MongoDB flag (persists across deploys)
+    if not is_reset_done():
         reset_and_start_fresh()
-        with open(marker, "w") as f:
-            f.write("done")
     else:
-        print(f"✅ Resuming from page {get_current_page()} (no reset)")
+        print(f"✅ Reset already performed. Resuming from page {get_current_page()} (no reset)")
     
     pdf = "book.pdf"
     if not os.path.exists(pdf):
