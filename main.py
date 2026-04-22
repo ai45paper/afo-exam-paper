@@ -25,11 +25,9 @@ SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
-# OpenRouter: auto‑select free model
 OPENROUTER_MODEL = "openrouter/free"
 OPENROUTER_TEMPERATURE = 0.4
 
-# Gemini models
 GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-1.5-flash",
@@ -37,7 +35,6 @@ GEMINI_MODELS = [
 ]
 GEMINI_TEMPERATURE = 0.4
 
-# Validation
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
     raise ValueError("❌ GEMINI_KEYS not set")
 if not MONGO_URI:
@@ -164,10 +161,10 @@ CRITICAL RULES:
 1. Level: MODERATE (conceptual and professional).
 2. Questions MUST be 2 to 3 lines long (exactly like the examples below). DO NOT use phrases like "According to the text".
 3. Return ONLY a valid JSON list. No code blocks, no markdown, no text explanations.
-4. Provide exactly 5 options (opt1 to opt5). Options should be meaningful and exam‑oriented (not too short, not too long – similar to the examples).
+4. Provide exactly 5 options (opt1 to opt5). Options should be meaningful and exam‑oriented (similar to the examples).
 5. Section Detection: Detect the subject (Agronomy, Soil Science, Horticulture, Genetics, etc.).
 
-STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT – these are the questions you gave initially):
+STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT):
 - "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
 - "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
 - "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
@@ -205,7 +202,38 @@ Text Source:
 """
 
 # ==========================================
-# 7. GENERATE QUESTIONS (OPENROUTER + GEMINI)
+# 7. HELPER: PARSE QUESTIONS FROM RESPONSE
+# ==========================================
+def parse_questions(response_text):
+    """Parse JSON response and ensure it's a list of dicts with required fields."""
+    # Remove markdown code blocks
+    clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
+    # Find JSON array
+    json_match = re.search(r'\[[\s\S]*\]', clean)
+    if not json_match:
+        raise ValueError("No JSON array found in response")
+    try:
+        questions = json.loads(json_match.group(0))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON decode error: {e}")
+    if not isinstance(questions, list):
+        questions = [questions]
+    # Validate each question
+    valid_questions = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        required = ['section', 'question', 'opt1', 'opt2', 'opt3', 'opt4', 'opt5', 'answer']
+        if all(k in q for k in required):
+            valid_questions.append(q)
+        else:
+            print(f"⚠️ Skipping malformed question: {q}")
+    if len(valid_questions) < 15:
+        raise ValueError(f"Only {len(valid_questions)} valid questions (need 15)")
+    return valid_questions[:20]
+
+# ==========================================
+# 8. GENERATE QUESTIONS (OPENROUTER + GEMINI)
 # ==========================================
 def generate_questions(text_chunk):
     prompt = build_prompt(text_chunk)
@@ -220,19 +248,9 @@ def generate_questions(text_chunk):
             print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}")
             try:
                 response_text = call_openrouter(api_key, prompt)
-                clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
-                json_match = re.search(r'\[[\s\S]*\]', clean)
-                if json_match:
-                    clean = json_match.group(0)
-                questions = json.loads(clean)
-                if not isinstance(questions, list):
-                    questions = [questions]
-                if len(questions) < 15:
-                    print(f"⚠️ Only {len(questions)} questions, retrying same key...")
-                    time.sleep(60)
-                    continue
+                questions = parse_questions(response_text)
                 print(f"✅ Generated {len(questions)} questions using OpenRouter (auto model)")
-                return questions[:20]
+                return questions
             except Exception as e:
                 err = str(e)
                 print(f"⚠️ OpenRouter key {key_idx} failed: {err[:150]}")
@@ -240,7 +258,7 @@ def generate_questions(text_chunk):
                     print("⏳ Insufficient credits – moving to next key (short wait)")
                     time.sleep(5)
                     continue
-                if "JSON" in err or "Expecting value" in err:
+                if "JSON" in err or "no JSON array" in err.lower():
                     print("⏳ JSON parse error – moving to next key")
                     time.sleep(5)
                     continue
@@ -265,19 +283,9 @@ def generate_questions(text_chunk):
                     }
                 )
                 raw = response.text
-                clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
-                json_match = re.search(r'\[[\s\S]*\]', clean)
-                if json_match:
-                    clean = json_match.group(0)
-                questions = json.loads(clean)
-                if not isinstance(questions, list):
-                    questions = [questions]
-                if len(questions) < 15:
-                    print(f"⚠️ Only {len(questions)} questions, retrying same model...")
-                    time.sleep(60)
-                    continue
+                questions = parse_questions(raw)
                 print(f"✅ Generated {len(questions)} questions using Gemini/{model}")
-                return questions[:20]
+                return questions
             except Exception as e:
                 err = str(e)
                 print(f"⚠️ Gemini {model} failed: {err[:150]}")
@@ -287,6 +295,10 @@ def generate_questions(text_chunk):
                     continue
                 if "404" in err:
                     print("⏳ Model not found – moving to next model")
+                    time.sleep(5)
+                    continue
+                if "JSON" in err or "no JSON array" in err.lower():
+                    print("⏳ JSON parse error – moving to next model")
                     time.sleep(5)
                     continue
                 print("⏳ Waiting 10 seconds")
@@ -306,7 +318,7 @@ def generate_questions(text_chunk):
     return generate_questions(text_chunk)
 
 # ==========================================
-# 8. MAIN LOOP
+# 9. MAIN LOOP
 # ==========================================
 def main():
     keep_alive()
