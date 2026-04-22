@@ -11,7 +11,7 @@ import gdown
 from keep_alive import keep_alive
 
 # ==========================================
-# 1. CONFIGURATION & ENVIRONMENT SETUP
+# 1. CONFIGURATION
 # ==========================================
 GEMINI_KEYS = os.getenv("GEMINI_KEYS", "").split(",")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -19,15 +19,14 @@ SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
-# Validate environment
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
-    raise ValueError("❌ GEMINI_KEYS environment variable not set properly")
+    raise ValueError("❌ GEMINI_KEYS not set")
 if not MONGO_URI:
-    raise ValueError("❌ MONGO_URI environment variable not set")
+    raise ValueError("❌ MONGO_URI not set")
 if not SERVICE_ACCOUNT_JSON:
-    raise ValueError("❌ SERVICE_ACCOUNT_JSON environment variable not set")
+    raise ValueError("❌ SERVICE_ACCOUNT_JSON not set")
 
-# MongoDB Setup
+# MongoDB
 try:
     client = MongoClient(MONGO_URI)
     db = client['agri_data_bank']
@@ -38,7 +37,7 @@ except Exception as e:
     print(f"❌ MongoDB Error: {e}")
     raise
 
-# Google Sheets Setup
+# Google Sheets
 try:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
@@ -51,7 +50,7 @@ except Exception as e:
     raise
 
 # ==========================================
-# 2. CORE UTILITY FUNCTIONS
+# 2. UTILITY FUNCTIONS
 # ==========================================
 def get_current_page():
     try:
@@ -62,25 +61,18 @@ def get_current_page():
             progress_collection.insert_one({"_id": "pdf_tracker", "current_page": 0})
             return 0
     except Exception as e:
-        print(f"⚠️ Error getting current page: {e}")
+        print(f"⚠️ Error getting page: {e}")
         return 0
 
 def update_current_page(page_num):
     try:
-        progress_collection.update_one(
-            {"_id": "pdf_tracker"}, 
-            {"$set": {"current_page": page_num}},
-            upsert=True
-        )
-        print(f"📌 Progress saved: page {page_num}")
+        progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
+        print(f"📌 Progress updated to page {page_num}")
     except Exception as e:
-        print(f"⚠️ Error updating current page: {e}")
+        print(f"⚠️ Error updating page: {e}")
 
 def get_active_gemini_key(attempt=0):
-    key_index = attempt % len(GEMINI_KEYS)
-    current_key = GEMINI_KEYS[key_index].strip()
-    print(f"🔑 Using Gemini key index {key_index}")
-    return current_key
+    return GEMINI_KEYS[attempt % len(GEMINI_KEYS)].strip()
 
 def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     text = ""
@@ -88,42 +80,31 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
         if not os.path.exists(pdf_path):
             print(f"❌ File not found: {pdf_path}")
             return ""
-        
         reader = pypdf.PdfReader(pdf_path)
         total_pages = len(reader.pages)
-        
         if start_page >= total_pages:
-            return None  # End of document
-        
+            return None
         actual_end = min(end_page, total_pages)
-        print(f"📖 Reading pages {start_page} to {actual_end} (total pages: {total_pages})...")
-        
+        print(f"📖 Reading pages {start_page} to {actual_end} (total pages: {total_pages})")
         for i in range(start_page, actual_end):
             try:
                 page_text = reader.pages[i].extract_text()
                 if page_text:
                     text += page_text + "\n"
-            except Exception as page_error:
-                print(f"⚠️ Error extracting page {i}: {page_error}")
+            except Exception as e:
+                print(f"⚠️ Page {i} error: {e}")
                 continue
     except Exception as e:
-        print(f"❌ PDF Reading Error: {e}")
+        print(f"❌ PDF error: {e}")
     return text if text.strip() else ""
 
-# ==========================================
-# 3. AI GENERATION LOGIC (FULL BRAIN + 3 MODEL FALLBACK)
-# ==========================================
 def generate_questions(text_chunk, key_attempt=0, model_attempt=0):
-    """
-    Generate questions with fallback across:
-    - 3 Gemini models (2.5, 2.0, 1.5 Flash)
-    - 9 API keys (rotated via key_attempt)
-    """
+    """Full AI brain + 3-model fallback + 9-key rotation"""
     try:
         current_key = get_active_gemini_key(key_attempt)
         ai_client = genai.Client(api_key=current_key)
         
-        # Full AI brain prompt with 21 example questions
+        # Full prompt with 21 examples
         prompt = f"""Role: Professional Agriculture Exam Paper Setter for UPSSSC AGTA and IBPS AFO.
 Task: Create 15-35 high-quality conceptual questions based on the provided text.
 
@@ -171,68 +152,42 @@ Text Source:
 {text_chunk}
 """
         
-        # Model fallback order: 2.5 -> 2.0 -> 1.5
-        models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
-        
-        # Start from current model_attempt index
-        for idx in range(model_attempt, len(models_to_try)):
-            model_name = models_to_try[idx]
+        models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+        for idx in range(model_attempt, len(models)):
+            model = models[idx]
             try:
-                print(f"🤖 Trying model: {model_name} (key attempt {key_attempt})")
-                response = ai_client.models.generate_content(model=model_name, contents=prompt)
-                response_text = response.text
-                print(f"✅ Generated using {model_name}")
-                
-                # Clean Markdown
-                clean_text = re.sub(r'```json\n|\n```|```', '', response_text).strip()
-                questions = json.loads(clean_text)
-                
+                print(f"🤖 Trying {model} (key {key_attempt})")
+                response = ai_client.models.generate_content(model=model, contents=prompt)
+                clean = re.sub(r'```json\n|\n```|```', '', response.text).strip()
+                questions = json.loads(clean)
                 if not isinstance(questions, list):
                     questions = [questions]
+                print(f"✅ Generated {len(questions)} questions using {model}")
                 return questions
-                
-            except Exception as model_err:
-                print(f"⚠️ Model {model_name} failed: {model_err}")
-                # Continue to next model within the same key
+            except Exception as e:
+                print(f"⚠️ {model} failed: {e}")
                 continue
         
-        # If all models failed with current key, try next key
+        # All models failed with this key → try next key
         if key_attempt < len(GEMINI_KEYS) - 1:
-            print(f"🔄 Switching to next Gemini key (attempt {key_attempt + 1})")
+            print(f"🔄 Switching to next API key (attempt {key_attempt+1})")
             time.sleep(2)
-            return generate_questions(text_chunk, key_attempt + 1, 0)  # reset model_attempt
+            return generate_questions(text_chunk, key_attempt+1, 0)
         else:
-            # All keys exhausted: long cooldown and restart from first key
-            print("🚨 All Gemini keys exhausted. Waiting 30 minutes...")
-            time.sleep(1800)
-            return generate_questions(text_chunk, 0, 0)
-        
-    except json.JSONDecodeError as json_error:
-        print(f"⚠️ JSON Parse Error: {json_error}")
-        # Retry with same key but next model or next key
-        if model_attempt < 2:  # try next model
-            return generate_questions(text_chunk, key_attempt, model_attempt + 1)
-        elif key_attempt < len(GEMINI_KEYS) - 1:
-            return generate_questions(text_chunk, key_attempt + 1, 0)
-        else:
-            print("🚨 Cooldown: Waiting 30 minutes...")
+            print("🚨 All keys exhausted. Waiting 30 minutes...")
             time.sleep(1800)
             return generate_questions(text_chunk, 0, 0)
             
     except Exception as e:
-        print(f"⚠️ Generation Error (Key {key_attempt}, Model attempt {model_attempt}): {e}")
-        # Fallback logic: try next model, then next key
-        if model_attempt < 2:
-            return generate_questions(text_chunk, key_attempt, model_attempt + 1)
-        elif key_attempt < len(GEMINI_KEYS) - 1:
-            return generate_questions(text_chunk, key_attempt + 1, 0)
+        print(f"❌ Generation error: {e}")
+        if key_attempt < len(GEMINI_KEYS) - 1:
+            return generate_questions(text_chunk, key_attempt+1, 0)
         else:
-            print("🚨 Cooldown: Waiting 30 minutes...")
             time.sleep(1800)
             return generate_questions(text_chunk, 0, 0)
 
 # ==========================================
-# 4. MAIN ENGINE (WITH DEBUG LOGS)
+# 3. MAIN FUNCTION (GUARANTEED LOOP)
 # ==========================================
 def main():
     keep_alive()
@@ -240,24 +195,23 @@ def main():
     
     pdf_filename = "book.pdf"
     
-    # Download PDF if not exists
+    # Download PDF if missing
     if not os.path.exists(pdf_filename):
-        print("📥 Starting Secure Book Download...")
+        print("📥 Downloading book from Google Drive...")
         try:
-            clean_id = DRIVE_FILE_ID.strip()
-            download_url = f"https://drive.google.com/uc?id={clean_id}"
-            print(f"📍 Download URL: {download_url}")
-            gdown.download(download_url, pdf_filename, quiet=False)
+            url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID.strip()}"
+            gdown.download(url, pdf_filename, quiet=False)
             if os.path.exists(pdf_filename):
-                file_size = os.path.getsize(pdf_filename)
-                print(f"✅ Book Downloaded Successfully. Size: {file_size} bytes")
+                print(f"✅ Downloaded: {os.path.getsize(pdf_filename)} bytes")
             else:
-                raise Exception("File not found after download attempt.")
+                raise Exception("Download failed")
         except Exception as e:
-            print(f"❌ CRITICAL ERROR: Download Failed! -> {e}")
-            return  # Stop if PDF missing
+            print(f"❌ Download error: {e}")
+            return
+    else:
+        print(f"✅ PDF already exists: {pdf_filename}")
     
-    # ========== MAIN PROCESSING LOOP ==========
+    # ========== CRITICAL: PROCESSING LOOP ==========
     print("\n" + "="*60)
     print("📖 STARTING PAGE-BY-PAGE PROCESSING LOOP")
     print("="*60 + "\n")
@@ -270,71 +224,61 @@ def main():
         try:
             current_page = get_current_page()
             next_page = current_page + 5
-            
-            print(f"\n🔍 [DEBUG] Processing chunk: pages {current_page} to {next_page}")
+            print(f"\n🔍 Processing pages {current_page} to {next_page}")
             
             text_chunk = extract_pdf_text(current_page, next_page, pdf_filename)
             
             if text_chunk is None:
-                print("🏁 MISSION COMPLETE: Entire book digitized.")
+                print("🏁 Reached end of PDF. Mission complete!")
                 break
             
             if len(text_chunk.strip()) > 150:
-                print(f"🧠 AI is thinking for pages {current_page} to {next_page}... (text length: {len(text_chunk)} chars)")
+                print(f"🧠 Generating questions for pages {current_page}-{next_page} (text length: {len(text_chunk)})")
                 questions = generate_questions(text_chunk)
                 
                 if questions and len(questions) > 0:
                     try:
-                        # Insert into MongoDB
+                        # MongoDB
                         questions_collection.insert_many(questions)
-                        print(f"✅ Saved {len(questions)} questions to MongoDB")
-                        
-                        # Append to Google Sheets
-                        sheet_data = []
+                        # Google Sheets
+                        rows = []
                         for q in questions:
-                            sheet_data.append([
+                            rows.append([
                                 q.get("section", "General"),
                                 q.get("question", ""),
                                 q.get("opt1", ""), q.get("opt2", ""), q.get("opt3", ""),
                                 q.get("opt4", ""), q.get("opt5", ""), q.get("answer", "")
                             ])
-                        
-                        sheet.append_rows(sheet_data)
-                        print(f"✅ Appended {len(questions)} rows to Google Sheets")
-                        
+                        sheet.append_rows(rows)
+                        print(f"✅ Saved {len(questions)} questions to MongoDB & Sheets")
                         page_count += len(questions)
                         error_count = 0
-                        
-                        # Update progress only on success
                         update_current_page(next_page)
-                    except Exception as sheet_error:
-                        print(f"❌ Database/Sheet Error: {sheet_error}")
+                    except Exception as e:
+                        print(f"❌ Save error: {e}")
                         error_count += 1
-                        if error_count >= MAX_ERRORS:
-                            print("🚨 Too many errors. Stopping execution.")
-                            break
                 else:
-                    print(f"⚠️ No questions generated for pages {current_page}-{next_page}. Advancing anyway.")
+                    print(f"⚠️ No questions generated, advancing to next chunk")
                     update_current_page(next_page)
             else:
-                print(f"⚠️ Insufficient text on pages {current_page}-{next_page} (length {len(text_chunk.strip())}). Skipping.")
+                print(f"⚠️ Insufficient text (length {len(text_chunk.strip())}), skipping chunk")
                 update_current_page(next_page)
             
-            print(f"⏳ Pause for 2 minutes (rate limiting)... (Total questions so far: {page_count})")
+            print(f"⏳ Waiting 2 minutes... (Total questions so far: {page_count})")
             time.sleep(120)
             
         except KeyboardInterrupt:
-            print("\n⛔ Process interrupted by user.")
+            print("\n⛔ Interrupted by user")
             break
-        except Exception as main_error:
-            print(f"❌ Main loop error: {main_error}")
+        except Exception as e:
+            print(f"❌ Loop error: {e}")
             error_count += 1
             if error_count >= MAX_ERRORS:
-                print("🚨 Too many errors. Stopping execution.")
+                print("🚨 Too many errors, stopping")
                 break
             time.sleep(30)
     
-    print(f"\n📊 Final Statistics: {page_count} questions generated and stored.")
+    print(f"\n📊 FINAL: {page_count} questions generated and stored.")
 
 if __name__ == "__main__":
     main()
