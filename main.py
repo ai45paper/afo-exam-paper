@@ -223,8 +223,7 @@ def main():
         print("📥 Starting Secure Book Download...")
         try:
             clean_id = DRIVE_FILE_ID.strip()
-            # ✅ Fixed the exact URL format as requested, removed all markdown brackets
-            download_url = f"[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){clean_id}"
+download_url = f"https://drive.google.com/uc?id={clean_id}"
             
             print(f"📍 Download URL: {download_url}")
             
