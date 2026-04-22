@@ -61,7 +61,7 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 2. RESET (ONLY ONCE – MONGO FLAG)
+# 2. RESET & TRACKER (PAGE + SECTION)
 # ==========================================
 def is_reset_done():
     doc = config_collection.find_one({"_id": "reset_flag"})
@@ -81,14 +81,29 @@ def update_current_page(page_num):
     progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
     print(f"📌 Page tracker updated to {page_num}")
 
+def get_current_section():
+    try:
+        tracker = progress_collection.find_one({"_id": "pdf_tracker"})
+        return tracker.get("current_section", "Agronomy") if tracker else "Agronomy"
+    except:
+        return "Agronomy"
+
+def update_current_section(section):
+    progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_section": section}}, upsert=True)
+    print(f"📌 Section updated to: {section}")
+
 def reset_and_start_fresh():
     print("🔄 Resetting all data – starting fresh from page 1...")
-    progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": 0}}, upsert=True)
+    progress_collection.update_one(
+        {"_id": "pdf_tracker"},
+        {"$set": {"current_page": 0, "current_section": "Agronomy"}},
+        upsert=True
+    )
     if 'questions_db' in db.list_collection_names():
         db['questions_db'].drop()
     sheet.clear()
     sheet.append_row(["Section", "Question", "Option1", "Option2", "Option3", "Option4", "Option5", "Answer"])
-    print("✅ Reset complete. Starting from page 0.")
+    print("✅ Reset complete. Starting from page 0 with section 'Agronomy'.")
     mark_reset_done()
 
 # ==========================================
@@ -105,29 +120,97 @@ def wait_until_5_30_am_ist():
     time.sleep(wait_seconds)
 
 # ==========================================
-# 4. PDF EXTRACTION (3 PAGES)
+# 4. PDF EXTRACTION (with retry, no page skip)
 # ==========================================
-def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
+def extract_pdf_text(start_page, end_page, pdf_path="book.pdf", retry=0):
     if not os.path.exists(pdf_path):
+        print(f"❌ PDF file missing: {pdf_path}")
         return ""
-    reader = pypdf.PdfReader(pdf_path)
-    total_pages = len(reader.pages)
-    if start_page >= total_pages:
-        return None
-    actual_end = min(end_page, total_pages)
-    print(f"📖 Reading pages {start_page} to {actual_end} (total {total_pages})")
-    text = ""
-    for i in range(start_page, actual_end):
-        try:
-            page_text = reader.pages[i].extract_text()
+    try:
+        reader = pypdf.PdfReader(pdf_path)
+        total_pages = len(reader.pages)
+        if start_page >= total_pages:
+            return None
+        actual_end = min(end_page, total_pages)
+        print(f"📖 Reading pages {start_page} to {actual_end} (total {total_pages})")
+        text = ""
+        for i in range(start_page, actual_end):
+            try:
+                page_text = reader.pages[i].extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            except Exception as e:
+                print(f"⚠️ pypdf page {i} error: {e}")
+                continue
+        if text.strip():
+            return text.strip()
+    except Exception as e:
+        print(f"⚠️ pypdf error: {e}")
+    
+    # Fallback to pymupdf if installed
+    try:
+        import pymupdf
+        doc = pymupdf.open(pdf_path)
+        total_pages = len(doc)
+        if start_page >= total_pages:
+            doc.close()
+            return None
+        actual_end = min(end_page, total_pages)
+        print(f"📖 (fallback) Reading pages {start_page} to {actual_end}")
+        text = ""
+        for i in range(start_page, actual_end):
+            page = doc[i]
+            page_text = page.get_text()
             if page_text:
                 text += page_text + "\n"
-        except:
-            continue
-    return text.strip() if text.strip() else ""
+        doc.close()
+        if text.strip():
+            return text.strip()
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️ pymupdf error: {e}")
+    
+    if retry < 3:
+        print(f"⚠️ Extraction failed (attempt {retry+1}/3). Waiting 10s and retrying...")
+        time.sleep(10)
+        return extract_pdf_text(start_page, end_page, pdf_path, retry+1)
+    else:
+        print(f"❌ Extraction failed after 3 attempts for pages {start_page}-{end_page}. Returning empty text.")
+        return ""
 
 # ==========================================
-# 5. OPENROUTER API CALL
+# 5. SECTION DETECTION (from page text)
+# ==========================================
+SUBJECT_KEYWORDS = {
+    "agronomy": "Agronomy",
+    "soil science": "Soil Science",
+    "horticulture": "Horticulture",
+    "genetics": "Genetics",
+    "plant pathology": "Plant Pathology",
+    "entomology": "Entomology",
+    "agricultural economics": "Agricultural Economics",
+    "extension education": "Extension Education",
+    "crop physiology": "Crop Physiology",
+    "seed science": "Seed Science",
+    "organic farming": "Organic Farming"
+}
+
+def detect_section(page_text, current_section):
+    """Scan the first few hundred characters for subject keywords."""
+    if not page_text:
+        return current_section
+    lower_text = page_text[:1000].lower()
+    for keyword, section_name in SUBJECT_KEYWORDS.items():
+        if keyword in lower_text:
+            # Avoid switching on same keyword if already that section
+            if section_name != current_section:
+                print(f"🔍 Detected new section: {section_name} (from keyword '{keyword}')")
+                return section_name
+    return current_section
+
+# ==========================================
+# 6. OPENROUTER API CALL
 # ==========================================
 def call_openrouter(api_key, prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -150,10 +233,11 @@ def call_openrouter(api_key, prompt):
         raise Exception(f"OpenRouter error {response.status_code}: {response.text[:200]}")
 
 # ==========================================
-# 6. PROMPT – EXACTLY MATCHING YOUR INITIAL EXAMPLES
+# 7. PROMPT – COMBINED QUESTION BRAIN (21 original + 27 rice examples)
 # ==========================================
 def build_prompt(text_chunk):
     truncated = text_chunk[:6000]
+    # Full prompt with examples (as given by user)
     return f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
 Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
 
@@ -161,10 +245,13 @@ CRITICAL RULES:
 1. Level: MODERATE (conceptual and professional).
 2. Questions MUST be 2 to 3 lines long (exactly like the examples below). DO NOT use phrases like "According to the text".
 3. Return ONLY a valid JSON list. No code blocks, no markdown, no text explanations.
-4. Provide exactly 5 options (opt1 to opt5). Options should be meaningful and exam‑oriented (similar to the examples).
-5. Section Detection: Detect the subject (Agronomy, Soil Science, Horticulture, Genetics, etc.).
+4. Provide exactly 5 options (opt1 to opt5). Options should be meaningful and exam‑oriented – similar to the examples below.
+5. The "answer" field must contain the EXACT correct option text (not the option number, but the text of the correct choice).
+6. Section detection: You will be provided the section name (Agronomy, Horticulture, etc.) based on the context of the PDF. Use that section for all questions in this chunk. Do NOT guess section from the text; we will provide it separately.
 
-STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT):
+STYLE EXAMPLES – YOUR BRAIN MUST MATCH THIS EXACT TONE, LENGTH, AND FORMAT:
+
+Original examples (21 questions):
 - "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
 - "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
 - "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
@@ -187,28 +274,100 @@ STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT):
 - "The conversion of nitrite or nitrate into gaseous nitrogen during the nitrogen cycle is known as what process?"
 - "The certification tag colour associated with Foundation Seed under seed certification standards is which of the following?"
 
-JSON Template:
-[
-  {{
-    "section": "Agronomy",
-    "question": "Question text...",
-    "opt1": "Choice A", "opt2": "Choice B", "opt3": "Choice C", "opt4": "Choice D", "opt5": "Choice E",
-    "answer": "Correct Choice"
-  }}
-]
+Additional examples (Rice, Soil, Genetics – showing correct format with options and answer):
+- "Rice, a major cereal crop ranking first in area and production in India, belongs to which botanical species with a diploid chromosome number of 24?"
+  Options: ["Oryza japonica", "Oryza sativa", "Oryza javanica", "Oryza indica", "Oryza glaberrima"]
+  Answer: "Oryza sativa"
+- "According to Vavilov, the cultivated rice species Oryza sativa is believed to have originated from which geographical region?"
+  Options: ["South America", "Africa", "Europe", "Australia", "South east Asia (Indo-Burma)"]
+  Answer: "South east Asia (Indo-Burma)"
+- "What is the diploid chromosome number of the common cultivated rice, Oryza sativa?"
+  Options: ["2n=12", "2n=24", "2n=36", "2n=48", "2n=20"]
+  Answer: "2n=24"
+- "The inflorescence of rice, consisting of a group of spikelets, is classified as what type?"
+  Options: ["Spike", "Panicle", "Raceme", "Umbel", "Corymb"]
+  Answer: "Panicle"
+- "Rice grain is technically a caryopsis. What is the characteristic fruit type of rice?"
+  Options: ["Drupe", "Berry", "Caryopsis", "Achene", "Nut"]
+  Answer: "Caryopsis"
+- "Which gene is responsible for the dwarfing characteristic in rice varieties, often associated with high-yielding strains?"
+  Options: ["Green revolution gene", "Dwarf-1", "Dee-gee-woo", "Short-stature gene", "Nano gene"]
+  Answer: "Dee-gee-woo"
+- "Oryza sativa has three main varietal types. Which type is known as temperate rice, responsive to intensive inputs, and has the highest productivity?"
+  Options: ["Indica", "Japonica", "Javanica", "Tropical rice", "Wild rice"]
+  Answer: "Japonica"
+- "Among the varietal types of rice, which one has the highest productivity, followed by Javanica and Indica?"
+  Options: ["Indica", "Japonica", "Javanica", "Hybrid rice", "Aromatic rice"]
+  Answer: "Japonica"
+- "The rice grain or caryopsis is tightly enclosed by lema and palea. What is this collective structure known as?"
+  Options: ["Husk", "Hull", "Chaff", "Glume", "Lemma"]
+  Answer: "Hull"
+- "Approximately what percentage of the world's rice production comes from Asia alone?"
+  Options: ["70%", "80%", "90%", "95%", "85%"]
+  Answer: "90%"
+- "Rice fields account for what percentage of the total arable land globally?"
+  Options: ["5%", "11%", "15%", "20%", "25%"]
+  Answer: "11%"
+- "In rice, the stem is specifically referred to by what term, made up of nodes and internodes?"
+  Options: ["Stalk", "Culm or haulm", "Trunk", "Shoot", "Axis"]
+  Answer: "Culm or haulm"
+- "What is the import policy for rice seeds in India, as mentioned in the context of rice cultivation?"
+  Options: ["Permitted freely", "Restricted", "Banned", "Allowed with quota", "Only for research"]
+  Answer: "Restricted"
+- "Rice is classified as what type of plant based on its photoperiod sensitivity, requiring short days for optimal growth?"
+  Options: ["Long day plant", "Short day plant", "Day neutral plant", "Intermediate day plant", "Photoperiod insensitive"]
+  Answer: "Short day plant"
+- "What is the optimal temperature range for blooming in rice crops, as specified for proper flowering?"
+  Options: ["20-25°C", "26.5-29.5°C", "21-37°C", "15-20°C", "30-35°C"]
+  Answer: "26.5-29.5°C"
+- "What is the preferred pH range for rice cultivation, ensuring optimal growth in soil conditions?"
+  Options: ["4-6", "5.5-6.5", "6-7", "7-8", "5-7"]
+  Answer: "5.5-6.5"
+- "Which soil texture is most suited for rice cultivation, providing good water retention and structure?"
+  Options: ["Sandy loam", "Clay or clay loam", "Silt loam", "Peaty soil", "Lateritic soil"]
+  Answer: "Clay or clay loam"
+- "Under continuous flooding in a rice-rice-rice cropping sequence, soil loses mechanical strength leading to fluffiness. What is this condition specifically called?"
+  Options: ["Waterlogging", "Salinization", "Fluffy Paddy Soil", "Compaction", "Erosion"]
+  Answer: "Fluffy Paddy Soil"
+- "Rice exhibits which type of germination where the cotyledons remain below the soil surface?"
+  Options: ["Epigeal", "Hypogeal", "Viviparous", "Cryptocotylar", "Phanerocotylar"]
+  Answer: "Hypogeal"
+- "In submerged rice cultivation, how is atmospheric oxygen transported to the roots to support growth?"
+  Options: ["Through stomata", "Via aerenchymatous tissues", "By diffusion from water", "Through root hairs", "By symbiotic bacteria"]
+  Answer: "Via aerenchymatous tissues"
+- "In rice cultivation using the SRI method, what is the recommended age of seedlings for transplanting to ensure optimal growth?"
+  Options: ["10-12 days old", "14-15 days old", "21-25 days old", "30-35 days old", "40-45 days old"]
+  Answer: "14-15 days old"
+- "What is the recommended percentage of nitrogen requirement that can be reduced in rice cultivation through the use of Biological Nitrogen Fixation?"
+  Options: ["10-15%", "20-25%", "25-30%", "30-35%", "40-50%"]
+  Answer: "25-30%"
+- "In puddled lowland rice fields, which soil zone is characterized by the presence of oxygen and is located just below the water surface?"
+  Options: ["Reduced zone", "Oxidized zone", "Aerobic zone", "Anaerobic zone", "Subsurface zone"]
+  Answer: "Oxidized zone"
+- "Which form of nitrogenous fertilizer is recommended for deep placement in the reduced zone of lowland rice fields to improve nitrogen use efficiency?"
+  Options: ["Nitrate fertilizers", "Urea", "Ammonium sulphate", "Calcium ammonium nitrate", "Ammonium phosphate"]
+  Answer: "Ammonium sulphate"
+- "Golden rice is a genetically modified variety developed to address vitamin A deficiency. Which gene is incorporated into Golden rice to produce beta-carotene?"
+  Options: ["Lysine gene", "Oryzenin gene", "Beta-carotene gene", "Silica gene", "Nitrogen fixation gene"]
+  Answer: "Beta-carotene gene"
+- "What is the hulling percentage in rice, which refers to the yield of milled rice from paddy?"
+  Options: ["50%", "60%", "66%", "70%", "75%"]
+  Answer: "66%"
+- "During the reproductive and grain formation stage in rice, what is the beneficial depth of water submergence in the field?"
+  Options: ["2.5 cm", "5 cm", "10 cm", "15 cm", "20 cm"]
+  Answer: "5 cm"
+
+Now, generate between 15 and 20 questions from the text below. Follow the exact style, format, and quality as shown in the examples.
 
 Text Source:
 {truncated}
 """
 
 # ==========================================
-# 7. HELPER: PARSE QUESTIONS FROM RESPONSE
+# 8. PARSE QUESTIONS (validation)
 # ==========================================
 def parse_questions(response_text):
-    """Parse JSON response and ensure it's a list of dicts with required fields."""
-    # Remove markdown code blocks
     clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
-    # Find JSON array
     json_match = re.search(r'\[[\s\S]*\]', clean)
     if not json_match:
         raise ValueError("No JSON array found in response")
@@ -218,107 +377,77 @@ def parse_questions(response_text):
         raise ValueError(f"JSON decode error: {e}")
     if not isinstance(questions, list):
         questions = [questions]
-    # Validate each question
-    valid_questions = []
+    valid = []
+    required = ['section', 'question', 'opt1', 'opt2', 'opt3', 'opt4', 'opt5', 'answer']
     for q in questions:
         if not isinstance(q, dict):
             continue
-        required = ['section', 'question', 'opt1', 'opt2', 'opt3', 'opt4', 'opt5', 'answer']
         if all(k in q for k in required):
-            valid_questions.append(q)
+            valid.append(q)
         else:
-            print(f"⚠️ Skipping malformed question: {q}")
-    if len(valid_questions) < 15:
-        raise ValueError(f"Only {len(valid_questions)} valid questions (need 15)")
-    return valid_questions[:20]
+            print(f"⚠️ Skipping malformed question (missing fields): {q}")
+    if len(valid) < 15:
+        raise ValueError(f"Only {len(valid)} valid questions (need 15)")
+    return valid[:20]
 
 # ==========================================
-# 8. GENERATE QUESTIONS (OPENROUTER + GEMINI)
+# 9. GENERATE QUESTIONS (OpenRouter + Gemini)
 # ==========================================
-def generate_questions(text_chunk):
-    prompt = build_prompt(text_chunk)
-    total_attempts = 0
-    max_attempts = (len(OPENROUTER_KEYS) + len(GEMINI_KEYS) * len(GEMINI_MODELS))
+def generate_questions(text_chunk, section_name):
+    # Inject section name into prompt
+    prompt_with_section = build_prompt(text_chunk) + f"\n\nFor this chunk, the section is: {section_name}. Use this section name for all questions."
+    max_attempts = len(OPENROUTER_KEYS) + len(GEMINI_KEYS) * len(GEMINI_MODELS)
+    total = 0
 
-    # LAYER 1: OPENROUTER
+    # OpenRouter
     if OPENROUTER_KEYS:
-        print(f"🌐 OpenRouter layer: {len(OPENROUTER_KEYS)} keys with auto model (temp={OPENROUTER_TEMPERATURE})")
         for key_idx, api_key in enumerate(OPENROUTER_KEYS):
-            total_attempts += 1
-            print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}")
+            total += 1
+            print(f"🌐 Attempt {total}/{max_attempts}: OpenRouter key {key_idx}")
             try:
-                response_text = call_openrouter(api_key, prompt)
-                questions = parse_questions(response_text)
-                print(f"✅ Generated {len(questions)} questions using OpenRouter (auto model)")
-                return questions
+                resp = call_openrouter(api_key, prompt_with_section)
+                qs = parse_questions(resp)
+                print(f"✅ Generated {len(qs)} questions using OpenRouter")
+                return qs
             except Exception as e:
                 err = str(e)
                 print(f"⚠️ OpenRouter key {key_idx} failed: {err[:150]}")
-                if "INSUFFICIENT_CREDITS" in err or "402" in err:
-                    print("⏳ Insufficient credits – moving to next key (short wait)")
+                if "INSUFFICIENT_CREDITS" in err or "402" in err or "JSON" in err:
                     time.sleep(5)
-                    continue
-                if "JSON" in err or "no JSON array" in err.lower():
-                    print("⏳ JSON parse error – moving to next key")
-                    time.sleep(5)
-                    continue
-                print("⏳ Waiting 60 seconds before next key...")
-                time.sleep(60)
+                else:
+                    time.sleep(60)
                 continue
 
-    # LAYER 2: GEMINI
-    print(f"🤖 Gemini layer: {len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts (temp={GEMINI_TEMPERATURE})")
+    # Gemini
     for key_idx, api_key in enumerate(GEMINI_KEYS):
         for model in GEMINI_MODELS:
-            total_attempts += 1
-            print(f"🤖 Attempt {total_attempts}/{max_attempts}: Gemini key {key_idx}, model {model}")
+            total += 1
+            print(f"🤖 Attempt {total}/{max_attempts}: Gemini key {key_idx}, model {model}")
             try:
-                gemini_client = genai.Client(api_key=api_key)
-                response = gemini_client.models.generate_content(
+                client = genai.Client(api_key=api_key)
+                resp = client.models.generate_content(
                     model=model,
-                    contents=prompt,
-                    config={
-                        "temperature": GEMINI_TEMPERATURE,
-                        "max_output_tokens": 2000
-                    }
+                    contents=prompt_with_section,
+                    config={"temperature": GEMINI_TEMPERATURE, "max_output_tokens": 2000}
                 )
-                raw = response.text
-                questions = parse_questions(raw)
-                print(f"✅ Generated {len(questions)} questions using Gemini/{model}")
-                return questions
+                qs = parse_questions(resp.text)
+                print(f"✅ Generated {len(qs)} questions using Gemini/{model}")
+                return qs
             except Exception as e:
                 err = str(e)
                 print(f"⚠️ Gemini {model} failed: {err[:150]}")
                 if "429" in err or "503" in err:
-                    print("⏳ Quota/overload – waiting 60 seconds")
                     time.sleep(60)
-                    continue
-                if "404" in err:
-                    print("⏳ Model not found – moving to next model")
+                else:
                     time.sleep(5)
-                    continue
-                if "JSON" in err or "no JSON array" in err.lower():
-                    print("⏳ JSON parse error – moving to next model")
-                    time.sleep(5)
-                    continue
-                print("⏳ Waiting 10 seconds")
-                time.sleep(10)
                 continue
 
-    # ALL ATTEMPTS EXHAUSTED
     print(f"🚨 All {max_attempts} attempts exhausted. Waiting 1 hour...")
     time.sleep(3600)
-    try:
-        test_client = genai.Client(api_key=GEMINI_KEYS[0])
-        test_client.models.generate_content(model=GEMINI_MODELS[0], contents="test")
-    except Exception as test_err:
-        if "429" in str(test_err):
-            print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
-            wait_until_5_30_am_ist()
-    return generate_questions(text_chunk)
+    return generate_questions(text_chunk, section_name)
 
 # ==========================================
-# 9. MAIN LOOP
+# 10. MAIN LOOP – WITH SECTION DETECTION
 # ==========================================
 def main():
     keep_alive()
@@ -327,28 +456,24 @@ def main():
     if not is_reset_done():
         reset_and_start_fresh()
     else:
-        print(f"✅ Reset already performed. Resuming from page {get_current_page()} (no reset)")
+        print(f"✅ Reset already performed. Resuming from page {get_current_page()} with section '{get_current_section()}' (no reset)")
     
     pdf = "book.pdf"
     if not os.path.exists(pdf):
         print("📥 Downloading book...")
         url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID.strip()}"
         gdown.download(url, pdf, quiet=False)
-        if os.path.exists(pdf):
-            print(f"✅ Downloaded: {os.path.getsize(pdf)} bytes")
-        else:
+        if not os.path.exists(pdf):
             print("❌ Download failed.")
             return
+        print(f"✅ Downloaded: {os.path.getsize(pdf)} bytes")
     else:
         print(f"✅ PDF exists: {pdf}")
     
     print("\n" + "="*60)
     print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
-    print(f"🌐 OpenRouter: {len(OPENROUTER_KEYS)} keys with auto model (temp={OPENROUTER_TEMPERATURE})")
-    print(f"🤖 Gemini: {len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts (temp={GEMINI_TEMPERATURE})")
-    print(f"🔁 Total attempts per chunk: {len(OPENROUTER_KEYS) + len(GEMINI_KEYS)*len(GEMINI_MODELS)}")
-    print("⏱️ Gaps: 5s for credits/parse/404 errors, 60s for quota/other errors")
-    print("🚨 After all fails: wait 1h, then if still 429 wait until 5:30 AM IST")
+    print("🔍 Section detection enabled – will update based on page content")
+    print("🚫 NO PAGE SKIPPING – will retry empty chunks indefinitely")
     print("="*60 + "\n")
     
     total_q = 0
@@ -359,26 +484,37 @@ def main():
             page = get_current_page()
             next_page = page + 3
             print(f"\n🔍 Chunk: pages {page} to {next_page-1}")
+            
             text = extract_pdf_text(page, next_page, pdf)
             if text is None:
-                print("🏁 End of PDF.")
+                print("🏁 End of PDF reached.")
                 break
-            if len(text) < 150:
-                print(f"⚠️ Low text ({len(text)} chars). Skipping.")
-                update_current_page(next_page)
-                continue
             
-            print(f"🧠 Generating 15–20 questions ({len(text)} chars)")
-            questions = generate_questions(text)
+            if len(text.strip()) < 150:
+                print(f"⚠️ Empty or very short text ({len(text)} chars). Will retry same chunk after 30 seconds.")
+                time.sleep(30)
+                continue  # stay on same page
+            
+            # Detect section from the first page of the chunk
+            current_section = get_current_section()
+            # Extract first page text for section detection (first 2000 chars)
+            first_page_text = text.split('\n')[0] if text else ""
+            new_section = detect_section(first_page_text, current_section)
+            if new_section != current_section:
+                update_current_section(new_section)
+                current_section = new_section
+            
+            print(f"🧠 Generating 15–20 questions ({len(text)} chars) for section: {current_section}")
+            questions = generate_questions(text, current_section)
             if not questions:
-                print("⚠️ No questions. Advancing.")
-                update_current_page(next_page)
+                print("⚠️ No questions generated. Retrying same chunk after 60 seconds.")
+                time.sleep(60)
                 continue
             
             rows = []
             for q in questions:
                 rows.append([
-                    q.get("section", "General"),
+                    current_section,   # Use detected section
                     q.get("question", ""),
                     q.get("opt1", ""), q.get("opt2", ""), q.get("opt3", ""),
                     q.get("opt4", ""), q.get("opt5", ""), q.get("answer", "")
@@ -393,7 +529,8 @@ def main():
         except Exception as e:
             print(f"❌ Loop error: {e}")
             errors += 1
-            if errors > 5:
+            if errors > 10:
+                print("Too many errors, stopping.")
                 break
             time.sleep(60)
     
