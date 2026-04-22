@@ -4,7 +4,6 @@ import json
 import time
 import re
 from datetime import datetime, timedelta
-import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
@@ -69,16 +68,18 @@ def reset_and_start_fresh():
     print("✅ Reset complete. Starting from page 0.")
 
 # ==========================================
-# 3. WAIT UNTIL 5:30 AM IST
+# 3. WAIT UNTIL 5:30 AM IST (without pytz)
 # ==========================================
 def wait_until_5_30_am_ist():
-    ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.now(ist)
-    target = now.replace(hour=5, minute=30, second=0, microsecond=0)
-    if now >= target:
-        target += timedelta(days=1)
-    wait_seconds = (target - now).total_seconds()
-    print(f"⏰ Waiting until {target.strftime('%Y-%m-%d %H:%M:%S')} IST ({wait_seconds/3600:.1f} hours)")
+    # IST = UTC + 5:30
+    now_utc = datetime.utcnow()
+    # Convert to IST
+    now_ist = now_utc + timedelta(hours=5, minutes=30)
+    target_ist = now_ist.replace(hour=5, minute=30, second=0, microsecond=0)
+    if now_ist >= target_ist:
+        target_ist += timedelta(days=1)
+    wait_seconds = (target_ist - now_ist).total_seconds()
+    print(f"⏰ Waiting until {target_ist.strftime('%Y-%m-%d %H:%M:%S')} IST ({wait_seconds/3600:.1f} hours)")
     time.sleep(wait_seconds)
 
 # ==========================================
@@ -209,7 +210,6 @@ JSON template:
                     time.sleep(3600)
                     # After 1 hour, if still quota issue, wait until 5:30 AM IST
                     print("⏳ Checking if quota reset...")
-                    # Try one more time with first key and first model
                     try:
                         test_client = get_gemini_client(0)
                         test_client.models.generate_content(model=MODELS[0], contents="test")
