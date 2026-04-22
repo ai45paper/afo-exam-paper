@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import re
@@ -10,8 +11,11 @@ import pypdf
 import gdown
 from keep_alive import keep_alive
 
+# Force flush prints (so Render logs show everything)
+sys.stdout.reconfigure(line_buffering=True)
+
 # ==========================================
-# 1. CONFIGURATION
+# CONFIGURATION
 # ==========================================
 GEMINI_KEYS = os.getenv("GEMINI_KEYS", "").split(",")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -27,30 +31,22 @@ if not SERVICE_ACCOUNT_JSON:
     raise ValueError("❌ SERVICE_ACCOUNT_JSON not set")
 
 # MongoDB
-try:
-    client = MongoClient(MONGO_URI)
-    db = client['agri_data_bank']
-    progress_collection = db['process_tracker']
-    questions_collection = db['questions_db']
-    print("✅ MongoDB Connection: SUCCESS")
-except Exception as e:
-    print(f"❌ MongoDB Error: {e}")
-    raise
+client = MongoClient(MONGO_URI)
+db = client['agri_data_bank']
+progress_collection = db['process_tracker']
+questions_collection = db['questions_db']
+print("✅ MongoDB Connection: SUCCESS")
 
 # Google Sheets
-try:
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    gsheet_client = gspread.authorize(creds)
-    sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
-    print("✅ Google Sheets Connection: SUCCESS")
-except Exception as e:
-    print(f"❌ Google Sheets Error: {e}")
-    raise
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+gsheet_client = gspread.authorize(creds)
+sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
+print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 2. UTILITY FUNCTIONS
+# FUNCTIONS
 # ==========================================
 def get_current_page():
     try:
@@ -61,7 +57,7 @@ def get_current_page():
 
 def update_current_page(page_num):
     progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
-    print(f"📌 Progress updated to page {page_num}")
+    print(f"📌 Progress: page {page_num}")
 
 def get_gemini_key(attempt):
     return GEMINI_KEYS[attempt % len(GEMINI_KEYS)].strip()
@@ -74,7 +70,7 @@ def extract_pdf_text(start, end, path="book.pdf"):
     if start >= total:
         return None
     end = min(end, total)
-    print(f"📖 Reading pages {start} to {end} (total pages: {total})")
+    print(f"📖 Reading pages {start} to {end} (total {total})")
     text = ""
     for i in range(start, end):
         try:
@@ -83,9 +79,6 @@ def extract_pdf_text(start, end, path="book.pdf"):
             continue
     return text.strip() if text.strip() else ""
 
-# ==========================================
-# 3. AI GENERATION (FULL BRAIN + FALLBACK)
-# ==========================================
 def generate_questions(chunk, key_attempt=0, model_attempt=0):
     prompt = f"""Role: Professional Agriculture Exam Paper Setter for UPSSSC AGTA and IBPS AFO.
 Task: Create 15-35 high-quality conceptual questions based on the provided text.
@@ -155,32 +148,39 @@ Text Source:
         return generate_questions(chunk, 0, 0)
 
 # ==========================================
-# 4. MAIN FUNCTION (PROCESSING LOOP)
+# MAIN FUNCTION (SAME WORKING STRUCTURE)
 # ==========================================
 def main():
     keep_alive()
     print("🚀 Agri-Bot System Initiated.")
+    
     pdf = "book.pdf"
-
-    # Download PDF if missing
+    
+    # ---------- DOWNLOAD ----------
     if not os.path.exists(pdf):
         print("📥 Downloading book from Google Drive...")
         url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID.strip()}"
         gdown.download(url, pdf, quiet=False)
+        # Force flush after download
+        sys.stdout.flush()
+        time.sleep(1)  # Give time for file system
         if os.path.exists(pdf):
             size = os.path.getsize(pdf)
             print(f"✅ Book Downloaded Successfully. Size: {size} bytes")
+            # Write a marker file to prove we reached here
+            with open("download_done.marker", "w") as f:
+                f.write("done")
         else:
             print("❌ Download failed. Exiting.")
             return
     else:
         print(f"✅ PDF already exists: {pdf} (size: {os.path.getsize(pdf)} bytes)")
-
-    # ========== PROCESSING LOOP ==========
+    
+    # ---------- PROCESSING LOOP ----------
     print("\n" + "="*60)
     print("📖 STARTING PAGE-BY-PAGE PROCESSING LOOP")
     print("="*60 + "\n")
-
+    
     total_q = 0
     errors = 0
     while True:
