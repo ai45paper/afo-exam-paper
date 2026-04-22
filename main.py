@@ -208,7 +208,7 @@ def detect_section(page_text, current_section):
     return current_section
 
 # ==========================================
-# 6. OPENROUTER API CALL
+# 6. OPENROUTER API CALL (with timeout)
 # ==========================================
 def call_openrouter(api_key, prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -235,8 +235,7 @@ def call_openrouter(api_key, prompt):
 # ==========================================
 def build_prompt(text_chunk, section_name):
     truncated = text_chunk[:6000]
-    # Full prompt with examples – same as before but we also include section instruction
-    prompt_template = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
+    prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
 Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
 
 CRITICAL RULES:
@@ -279,34 +278,89 @@ Additional examples (Rice, Soil, Genetics) – these use opt1..opt5 format:
   Opt1: "South America", Opt2: "Africa", Opt3: "Europe", Opt4: "Australia", Opt5: "South east Asia (Indo-Burma)", Answer: "South east Asia (Indo-Burma)"
 - Example: "What is the diploid chromosome number of the common cultivated rice, Oryza sativa?"
   Opt1: "2n=12", Opt2: "2n=24", Opt3: "2n=36", Opt4: "2n=48", Opt5: "2n=20", Answer: "2n=24"
-- ... (you have all 27 examples in the full code; I'll keep it concise but the final code includes all)
+- Example: "The inflorescence of rice, consisting of a group of spikelets, is classified as what type?"
+  Opt1: "Spike", Opt2: "Panicle", Opt3: "Raceme", Opt4: "Umbel", Opt5: "Corymb", Answer: "Panicle"
+- Example: "Rice grain is technically a caryopsis. What is the characteristic fruit type of rice?"
+  Opt1: "Drupe", Opt2: "Berry", Opt3: "Caryopsis", Opt4: "Achene", Opt5: "Nut", Answer: "Caryopsis"
+- Example: "Which gene is responsible for the dwarfing characteristic in rice varieties, often associated with high-yielding strains?"
+  Opt1: "Green revolution gene", Opt2: "Dwarf-1", Opt3: "Dee-gee-woo", Opt4: "Short-stature gene", Opt5: "Nano gene", Answer: "Dee-gee-woo"
+- Example: "Oryza sativa has three main varietal types. Which type is known as temperate rice, responsive to intensive inputs, and has the highest productivity?"
+  Opt1: "Indica", Opt2: "Japonica", Opt3: "Javanica", Opt4: "Tropical rice", Opt5: "Wild rice", Answer: "Japonica"
+- Example: "Among the varietal types of rice, which one has the highest productivity, followed by Javanica and Indica?"
+  Opt1: "Indica", Opt2: "Japonica", Opt3: "Javanica", Opt4: "Hybrid rice", Opt5: "Aromatic rice", Answer: "Japonica"
+- Example: "The rice grain or caryopsis is tightly enclosed by lema and palea. What is this collective structure known as?"
+  Opt1: "Husk", Opt2: "Hull", Opt3: "Chaff", Opt4: "Glume", Opt5: "Lemma", Answer: "Hull"
+- Example: "Approximately what percentage of the world's rice production comes from Asia alone?"
+  Opt1: "70%", Opt2: "80%", Opt3: "90%", Opt4: "95%", Opt5: "85%", Answer: "90%"
+- Example: "Rice fields account for what percentage of the total arable land globally?"
+  Opt1: "5%", Opt2: "11%", Opt3: "15%", Opt4: "20%", Opt5: "25%", Answer: "11%"
+- Example: "In rice, the stem is specifically referred to by what term, made up of nodes and internodes?"
+  Opt1: "Stalk", Opt2: "Culm or haulm", Opt3: "Trunk", Opt4: "Shoot", Opt5: "Axis", Answer: "Culm or haulm"
+- Example: "What is the import policy for rice seeds in India, as mentioned in the context of rice cultivation?"
+  Opt1: "Permitted freely", Opt2: "Restricted", Opt3: "Banned", Opt4: "Allowed with quota", Opt5: "Only for research", Answer: "Restricted"
+- Example: "Rice is classified as what type of plant based on its photoperiod sensitivity, requiring short days for optimal growth?"
+  Opt1: "Long day plant", Opt2: "Short day plant", Opt3: "Day neutral plant", Opt4: "Intermediate day plant", Opt5: "Photoperiod insensitive", Answer: "Short day plant"
+- Example: "What is the optimal temperature range for blooming in rice crops, as specified for proper flowering?"
+  Opt1: "20-25°C", Opt2: "26.5-29.5°C", Opt3: "21-37°C", Opt4: "15-20°C", Opt5: "30-35°C", Answer: "26.5-29.5°C"
+- Example: "What is the preferred pH range for rice cultivation, ensuring optimal growth in soil conditions?"
+  Opt1: "4-6", Opt2: "5.5-6.5", Opt3: "6-7", Opt4: "7-8", Opt5: "5-7", Answer: "5.5-6.5"
+- Example: "Which soil texture is most suited for rice cultivation, providing good water retention and structure?"
+  Opt1: "Sandy loam", Opt2: "Clay or clay loam", Opt3: "Silt loam", Opt4: "Peaty soil", Opt5: "Lateritic soil", Answer: "Clay or clay loam"
+- Example: "Under continuous flooding in a rice-rice-rice cropping sequence, soil loses mechanical strength leading to fluffiness. What is this condition specifically called?"
+  Opt1: "Waterlogging", Opt2: "Salinization", Opt3: "Fluffy Paddy Soil", Opt4: "Compaction", Opt5: "Erosion", Answer: "Fluffy Paddy Soil"
+- Example: "Rice exhibits which type of germination where the cotyledons remain below the soil surface?"
+  Opt1: "Epigeal", Opt2: "Hypogeal", Opt3: "Viviparous", Opt4: "Cryptocotylar", Opt5: "Phanerocotylar", Answer: "Hypogeal"
+- Example: "In submerged rice cultivation, how is atmospheric oxygen transported to the roots to support growth?"
+  Opt1: "Through stomata", Opt2: "Via aerenchymatous tissues", Opt3: "By diffusion from water", Opt4: "Through root hairs", Opt5: "By symbiotic bacteria", Answer: "Via aerenchymatous tissues"
+- Example: "In rice cultivation using the SRI method, what is the recommended age of seedlings for transplanting to ensure optimal growth?"
+  Opt1: "10-12 days old", Opt2: "14-15 days old", Opt3: "21-25 days old", Opt4: "30-35 days old", Opt5: "40-45 days old", Answer: "14-15 days old"
+- Example: "What is the recommended percentage of nitrogen requirement that can be reduced in rice cultivation through the use of Biological Nitrogen Fixation?"
+  Opt1: "10-15%", Opt2: "20-25%", Opt3: "25-30%", Opt4: "30-35%", Opt5: "40-50%", Answer: "25-30%"
+- Example: "In puddled lowland rice fields, which soil zone is characterized by the presence of oxygen and is located just below the water surface?"
+  Opt1: "Reduced zone", Opt2: "Oxidized zone", Opt3: "Aerobic zone", Opt4: "Anaerobic zone", Opt5: "Subsurface zone", Answer: "Oxidized zone"
+- Example: "Which form of nitrogenous fertilizer is recommended for deep placement in the reduced zone of lowland rice fields to improve nitrogen use efficiency?"
+  Opt1: "Nitrate fertilizers", Opt2: "Urea", Opt3: "Ammonium sulphate", Opt4: "Calcium ammonium nitrate", Opt5: "Ammonium phosphate", Answer: "Ammonium sulphate"
+- Example: "Golden rice is a genetically modified variety developed to address vitamin A deficiency. Which gene is incorporated into Golden rice to produce beta-carotene?"
+  Opt1: "Lysine gene", Opt2: "Oryzenin gene", Opt3: "Beta-carotene gene", Opt4: "Silica gene", Opt5: "Nitrogen fixation gene", Answer: "Beta-carotene gene"
+- Example: "What is the hulling percentage in rice, which refers to the yield of milled rice from paddy?"
+  Opt1: "50%", Opt2: "60%", Opt3: "66%", Opt4: "70%", Opt5: "75%", Answer: "66%"
+- Example: "During the reproductive and grain formation stage in rice, what is the beneficial depth of water submergence in the field?"
+  Opt1: "2.5 cm", Opt2: "5 cm", Opt3: "10 cm", Opt4: "15 cm", Opt5: "20 cm", Answer: "5 cm"
 
 Now, generate between 15 and 20 questions from the text below. Follow the exact format: each question as a JSON object with section (set to "{section_name}"), question, opt1, opt2, opt3, opt4, opt5, answer.
 
 Text Source:
 {truncated}
 """
-    return prompt_template
+    return prompt
 
 # ==========================================
-# 8. ROBUST QUESTION PARSER (handles both formats)
+# 8. ROBUST QUESTION PARSER (handles missing JSON, options array, etc.)
 # ==========================================
-def parse_questions(response_text, default_section):
+def parse_questions(response_text, default_section, retry_count=0):
     """
-    Convert AI response to list of dicts with required fields.
-    Handles both: {question, options:[], answer} and {question, opt1..opt5, answer}
-    Also adds missing section.
+    Try multiple strategies to extract a valid list of questions.
     """
-    # Clean markdown
+    # Strategy 1: Clean and find JSON array
     clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
-    # Find JSON array
     json_match = re.search(r'\[[\s\S]*\]', clean)
     if not json_match:
+        # Strategy 2: Try to find any JSON-like structure
+        json_match = re.search(r'\[\s*\{[\s\S]*\}\s*\]', clean)
+    if not json_match:
         raise ValueError("No JSON array found in response")
+    
     try:
         raw_questions = json.loads(json_match.group(0))
     except json.JSONDecodeError as e:
-        raise ValueError(f"JSON decode error: {e}")
+        # Strategy 3: Try to fix common issues (e.g., trailing commas)
+        fixed = re.sub(r',\s*}', '}', json_match.group(0))
+        fixed = re.sub(r',\s*\]', ']', fixed)
+        try:
+            raw_questions = json.loads(fixed)
+        except:
+            raise ValueError(f"JSON decode error after fix: {e}")
+    
     if not isinstance(raw_questions, list):
         raw_questions = [raw_questions]
     
@@ -314,59 +368,71 @@ def parse_questions(response_text, default_section):
     for q in raw_questions:
         if not isinstance(q, dict):
             continue
-        # Normalize: if 'options' list exists, convert to opt1..opt5
+        
+        # Convert 'options' array to opt1..opt5 if present
         if 'options' in q and isinstance(q['options'], list):
             opts = q['options']
-            # Ensure exactly 5 options
             while len(opts) < 5:
                 opts.append("")
             for i, opt in enumerate(opts[:5], 1):
                 q[f'opt{i}'] = opt
             del q['options']
+        
         # Check required fields
         required = ['question', 'opt1', 'opt2', 'opt3', 'opt4', 'opt5', 'answer']
         if not all(k in q for k in required):
-            print(f"⚠️ Skipping malformed question (missing fields): {q}")
+            # If answer exists but options missing, try to recover? Skip.
             continue
+        
         # Add section if missing
         if 'section' not in q or not q['section']:
             q['section'] = default_section
+        
         valid.append(q)
     
     if len(valid) < 15:
+        # If we have at least 10, maybe still use them? But requirement says 15.
+        # If retry_count < 2, we can raise to retry the API call.
         raise ValueError(f"Only {len(valid)} valid questions (need 15)")
+    
     return valid[:20]
 
 # ==========================================
-# 9. GENERATE QUESTIONS (OpenRouter + Gemini)
+# 9. GENERATE QUESTIONS (OpenRouter + Gemini) with smart retry
 # ==========================================
 def generate_questions(text_chunk, section_name):
     prompt = build_prompt(text_chunk, section_name)
     max_attempts = len(OPENROUTER_KEYS) + len(GEMINI_KEYS) * len(GEMINI_MODELS)
     total = 0
 
-    # OpenRouter
+    # OpenRouter attempts
     if OPENROUTER_KEYS:
         for key_idx, api_key in enumerate(OPENROUTER_KEYS):
             total += 1
-            print(f"🌐 Attempt {total}/{max_attempts}: OpenRouter key {key_idx}")
-            try:
-                resp = call_openrouter(api_key, prompt)
-                qs = parse_questions(resp, section_name)
-                print(f"✅ Generated {len(qs)} questions using OpenRouter")
-                return qs
-            except Exception as e:
-                err = str(e)
-                print(f"⚠️ OpenRouter key {key_idx} failed: {err[:150]}")
-                if "INSUFFICIENT_CREDITS" in err or "402" in err:
-                    time.sleep(5)
-                elif "JSON" in err or "valid questions" in err:
-                    time.sleep(5)
-                else:
-                    time.sleep(60)
-                continue
+            # For each key, we can retry up to 2 times if response is malformed
+            for retry in range(2):
+                print(f"🌐 Attempt {total}/{max_attempts} (retry {retry+1}/2): OpenRouter key {key_idx}")
+                try:
+                    resp = call_openrouter(api_key, prompt)
+                    qs = parse_questions(resp, section_name)
+                    print(f"✅ Generated {len(qs)} questions using OpenRouter")
+                    return qs
+                except Exception as e:
+                    err = str(e)
+                    print(f"⚠️ OpenRouter key {key_idx} failed (retry {retry+1}): {err[:150]}")
+                    if "INSUFFICIENT_CREDITS" in err or "402" in err:
+                        break  # move to next key
+                    if "No JSON array" in err:
+                        # Wait a bit and retry same key
+                        time.sleep(5)
+                        continue
+                    # Other errors: wait 10s then retry
+                    time.sleep(10)
+            # After exhausting retries for this key, move to next key
+            time.sleep(2)
+            continue
 
-    # Gemini
+    # Gemini attempts
     for key_idx, api_key in enumerate(GEMINI_KEYS):
         for model in GEMINI_MODELS:
             total += 1
@@ -390,9 +456,10 @@ def generate_questions(text_chunk, section_name):
                     time.sleep(5)
                 continue
 
+    # All attempts exhausted
     print(f"🚨 All {max_attempts} attempts exhausted. Waiting 1 hour...")
     time.sleep(3600)
-    # After long wait, try again (recursive)
+    # After long wait, try again recursively
     return generate_questions(text_chunk, section_name)
 
 # ==========================================
@@ -424,6 +491,7 @@ def main():
     print("🔍 Section detection enabled – will update based on page content")
     print("🚫 NO PAGE SKIPPING – will retry empty chunks indefinitely")
     print("🔄 Robust parser – converts 'options' array to opt1-opt5 and adds missing section")
+    print("⏱️ Each API call retries up to 2 times on malformed JSON")
     print("="*60 + "\n")
     
     total_q = 0
@@ -447,7 +515,6 @@ def main():
             
             # Detect section from the first page of the chunk
             current_section = get_current_section()
-            # Extract first page text for section detection (first 2000 chars)
             first_page_text = text.split('\n')[0] if text else ""
             new_section = detect_section(first_page_text, current_section)
             if new_section != current_section:
