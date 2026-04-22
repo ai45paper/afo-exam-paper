@@ -11,7 +11,7 @@ import gdown
 from keep_alive import keep_alive
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION & VALIDATION
 # ==========================================
 GEMINI_KEYS = os.getenv("GEMINI_KEYS", "").split(",")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -19,8 +19,9 @@ SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
+# Validate environment
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
-    raise ValueError("❌ GEMINI_KEYS not set")
+    raise ValueError("❌ GEMINI_KEYS not set properly")
 if not MONGO_URI:
     raise ValueError("❌ MONGO_URI not set")
 if not SERVICE_ACCOUNT_JSON:
@@ -66,8 +67,12 @@ def get_current_page():
 
 def update_current_page(page_num):
     try:
-        progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
-        print(f"📌 Progress updated to page {page_num}")
+        progress_collection.update_one(
+            {"_id": "pdf_tracker"},
+            {"$set": {"current_page": page_num}},
+            upsert=True
+        )
+        print(f"📌 Progress updated: page {page_num}")
     except Exception as e:
         print(f"⚠️ Error updating page: {e}")
 
@@ -92,19 +97,21 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
                 if page_text:
                     text += page_text + "\n"
             except Exception as e:
-                print(f"⚠️ Page {i} error: {e}")
+                print(f"⚠️ Page {i} extraction error: {e}")
                 continue
     except Exception as e:
         print(f"❌ PDF error: {e}")
     return text if text.strip() else ""
 
+# ==========================================
+# 3. AI GENERATION – FULL BRAIN + 3 MODELS + 9 KEYS
+# ==========================================
 def generate_questions(text_chunk, key_attempt=0, model_attempt=0):
-    """Full AI brain + 3-model fallback + 9-key rotation"""
     try:
         current_key = get_active_gemini_key(key_attempt)
         ai_client = genai.Client(api_key=current_key)
         
-        # Full prompt with 21 examples
+        # Full prompt with 21 examples (AI brain)
         prompt = f"""Role: Professional Agriculture Exam Paper Setter for UPSSSC AGTA and IBPS AFO.
 Task: Create 15-35 high-quality conceptual questions based on the provided text.
 
@@ -149,16 +156,19 @@ JSON Template:
 ]
 
 Text Source:
-{text_chunk}
+{text_chunk[:20000]}  # Limit to avoid token overflow
 """
         
         models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+        
+        # Try models in sequence starting from model_attempt
         for idx in range(model_attempt, len(models)):
             model = models[idx]
             try:
-                print(f"🤖 Trying {model} (key {key_attempt})")
+                print(f"🤖 Trying {model} (key index {key_attempt})")
                 response = ai_client.models.generate_content(model=model, contents=prompt)
-                clean = re.sub(r'```json\n|\n```|```', '', response.text).strip()
+                raw = response.text
+                clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
                 questions = json.loads(clean)
                 if not isinstance(questions, list):
                     questions = [questions]
@@ -168,18 +178,19 @@ Text Source:
                 print(f"⚠️ {model} failed: {e}")
                 continue
         
-        # All models failed with this key → try next key
+        # If all models failed with this key, try next key
         if key_attempt < len(GEMINI_KEYS) - 1:
             print(f"🔄 Switching to next API key (attempt {key_attempt+1})")
             time.sleep(2)
             return generate_questions(text_chunk, key_attempt+1, 0)
         else:
-            print("🚨 All keys exhausted. Waiting 30 minutes...")
+            # All keys exhausted: long cooldown and restart from first key
+            print("🚨 All API keys exhausted. Waiting 30 minutes...")
             time.sleep(1800)
             return generate_questions(text_chunk, 0, 0)
             
     except Exception as e:
-        print(f"❌ Generation error: {e}")
+        print(f"❌ Generation critical error: {e}")
         if key_attempt < len(GEMINI_KEYS) - 1:
             return generate_questions(text_chunk, key_attempt+1, 0)
         else:
@@ -187,31 +198,33 @@ Text Source:
             return generate_questions(text_chunk, 0, 0)
 
 # ==========================================
-# 3. MAIN FUNCTION (GUARANTEED LOOP)
+# 4. MAIN FUNCTION – WITH GUARANTEED LOOP
 # ==========================================
 def main():
+    # Start keep-alive server (background thread)
     keep_alive()
     print("🚀 Agri-Bot System Initiated.")
     
     pdf_filename = "book.pdf"
     
-    # Download PDF if missing
+    # Download PDF if not exists
     if not os.path.exists(pdf_filename):
         print("📥 Downloading book from Google Drive...")
         try:
             url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID.strip()}"
             gdown.download(url, pdf_filename, quiet=False)
             if os.path.exists(pdf_filename):
-                print(f"✅ Downloaded: {os.path.getsize(pdf_filename)} bytes")
+                size = os.path.getsize(pdf_filename)
+                print(f"✅ Downloaded: {size} bytes")
             else:
-                raise Exception("Download failed")
+                raise Exception("File not found after download")
         except Exception as e:
             print(f"❌ Download error: {e}")
             return
     else:
         print(f"✅ PDF already exists: {pdf_filename}")
     
-    # ========== CRITICAL: PROCESSING LOOP ==========
+    # ========== MAIN PROCESSING LOOP (FORCED TO RUN) ==========
     print("\n" + "="*60)
     print("📖 STARTING PAGE-BY-PAGE PROCESSING LOOP")
     print("="*60 + "\n")
@@ -224,12 +237,12 @@ def main():
         try:
             current_page = get_current_page()
             next_page = current_page + 5
-            print(f"\n🔍 Processing pages {current_page} to {next_page}")
+            print(f"\n🔍 Processing chunk: pages {current_page} to {next_page}")
             
             text_chunk = extract_pdf_text(current_page, next_page, pdf_filename)
             
             if text_chunk is None:
-                print("🏁 Reached end of PDF. Mission complete!")
+                print("🏁 End of PDF reached. Mission complete!")
                 break
             
             if len(text_chunk.strip()) > 150:
@@ -238,9 +251,9 @@ def main():
                 
                 if questions and len(questions) > 0:
                     try:
-                        # MongoDB
+                        # Save to MongoDB
                         questions_collection.insert_many(questions)
-                        # Google Sheets
+                        # Prepare rows for Google Sheets
                         rows = []
                         for q in questions:
                             rows.append([
@@ -250,13 +263,16 @@ def main():
                                 q.get("opt4", ""), q.get("opt5", ""), q.get("answer", "")
                             ])
                         sheet.append_rows(rows)
-                        print(f"✅ Saved {len(questions)} questions to MongoDB & Sheets")
+                        print(f"✅ Saved {len(questions)} questions to MongoDB and Google Sheets")
                         page_count += len(questions)
                         error_count = 0
                         update_current_page(next_page)
                     except Exception as e:
-                        print(f"❌ Save error: {e}")
+                        print(f"❌ Database/Sheet error: {e}")
                         error_count += 1
+                        if error_count >= MAX_ERRORS:
+                            print("🚨 Too many errors, stopping")
+                            break
                 else:
                     print(f"⚠️ No questions generated, advancing to next chunk")
                     update_current_page(next_page)
@@ -278,7 +294,7 @@ def main():
                 break
             time.sleep(30)
     
-    print(f"\n📊 FINAL: {page_count} questions generated and stored.")
+    print(f"\n📊 FINAL STATISTICS: {page_count} questions generated and stored.")
 
 if __name__ == "__main__":
     main()
