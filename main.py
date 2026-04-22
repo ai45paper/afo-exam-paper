@@ -27,15 +27,15 @@ SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
 # OpenRouter: auto‑select free model
 OPENROUTER_MODEL = "openrouter/free"
-OPENROUTER_TEMPERATURE = 0.4   # best for exam questions
+OPENROUTER_TEMPERATURE = 0.4
 
-# Gemini models (as requested)
+# Gemini models
 GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-1.5-flash",
     "gemini-1.5-pro"
 ]
-GEMINI_TEMPERATURE = 0.4        # consistent with OpenRouter
+GEMINI_TEMPERATURE = 0.4
 
 # Validation
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
@@ -45,7 +45,6 @@ if not MONGO_URI:
 if not SERVICE_ACCOUNT_JSON:
     raise ValueError("❌ SERVICE_ACCOUNT_JSON not set")
 
-# Clean keys
 OPENROUTER_KEYS = [k.strip() for k in OPENROUTER_KEYS if k.strip()]
 GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS if k.strip()]
 
@@ -131,7 +130,7 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text.strip() if text.strip() else ""
 
 # ==========================================
-# 5. OPENROUTER API CALL (with temperature)
+# 5. OPENROUTER API CALL
 # ==========================================
 def call_openrouter(api_key, prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -154,7 +153,7 @@ def call_openrouter(api_key, prompt):
         raise Exception(f"OpenRouter error {response.status_code}: {response.text[:200]}")
 
 # ==========================================
-# 6. PROFESSIONAL PROMPT (AFO MAINS LEVEL)
+# 6. PROFESSIONAL PROMPT – SHORT Q & SHORT OPTIONS
 # ==========================================
 def build_prompt(text_chunk):
     truncated = text_chunk[:6000]
@@ -162,36 +161,29 @@ def build_prompt(text_chunk):
 Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
 
 CRITICAL RULES (STRICTLY FOLLOW):
-1. Each question MUST be at least 2 full lines long (40-80 words). Never use single-line or very short questions.
-2. Options (opt1 to opt5) must be conceptually challenging, not obvious. They should be plausible distractors.
-3. Question tone must be professional, direct, and exam‑oriented – as in AFO Mains.
+1. Each question MUST be **at most 2 lines** (concise, to the point). Never make questions longer than 2 lines.
+2. Options (opt1 to opt5) must be **very short** – preferably 1 to 3 words, or a short phrase (e.g., "Fluchloralin", "Pre-emergence", "2 kg/ha", "At sowing", "Root uptake"). Do NOT write long sentences as options.
+3. Question tone: professional, direct, exam‑oriented (like AFO Mains).
 4. Do NOT use phrases like "According to the text" or "Based on the above".
 5. Return ONLY a valid JSON list (no markdown, no extra text, no explanation).
 6. Each object must have exactly: section, question, opt1, opt2, opt3, opt4, opt5, answer.
 7. Section should be the subject (Agronomy, Soil Science, Horticulture, Genetics, Plant Pathology, etc.).
 
-STYLE EXAMPLES (match this length and complexity):
-- "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
-- "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
-- "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
-- "The traditional shifting cultivation system known as Jhum is also referred to as 'Bewar' and 'Dahiya.' In which Indian state are these local names used?"
-- "In papaya cultivation, a proportion of male plants must be retained to ensure adequate pollination for fruit development. What is the recommended percentage of male plants?"
-- "Among domestic animals, cow milk is known to be comparatively low in which essential mineral, making supplementation important for infants and certain populations?"
-- "LD50 is a standard toxicological parameter used to express the potency of pesticides. What does LD50 specifically measure?"
-- "Olsen's extractant method is widely used to determine the availability of which nutrient in neutral to alkaline soils?"
-- "Anthrax, a highly contagious disease affecting livestock, can also be transmitted to humans. By what alternate name is this zoonotic disease known?"
-- "Blanching of vegetables prior to freezing is carried out primarily to achieve which purpose?"
-- "Which organization in India specifically focuses on strengthening and promoting small-scale shrimp farming through technical support and cooperative development?"
-- "Which Indian buffalo breed is regarded as the best globally due to milk production and is extensively used for grading up various local buffalo populations?"
-- "The certification required to declare plants or planting material as disease-free for international export is known as which certificate?"
-- "Which prestigious North Indian mango cultivar is famous for its sweet flavour, pleasant aroma, fiberless pulp, thin stone, and excellent transport quality?"
-- "What is the primary advantage of vegetative (clonal) propagation of plants compared to seed propagation?"
-- "Which of the following statements is NOT correct regarding forest soils?"
-- "In diffusion of innovations, what term is used for the group of individuals who are traditional and the last to adopt new technology and often show resistance until the idea is fully established?"
-- "A mating or crossing between two individuals differing in only one pair of contrasting alleles results in which type of genetic cross?"
-- "The stable, dark, amorphous, colloidal product of organic matter decomposition that is resistant to microbial breakdown is known as what?"
-- "The conversion of nitrite or nitrate into gaseous nitrogen during the nitrogen cycle is known as what process?"
-- "The certification tag colour associated with Foundation Seed under seed certification standards is which of the following?"
+STYLE EXAMPLES (short questions, short options):
+- "Which herbicide is used as pre‑emergence in sunflower at 2 kg ha⁻¹?"
+  Options: ["Fluchloralin", "Pendimethalin", "Atrazine", "Glyphosate", "2,4-D"]
+- "What is the critical timing for pre‑emergence herbicide application to avoid crop injury?"
+  Options: ["Before sowing", "At sowing", "After emergence", "At flowering", "At maturity"]
+- "Which nutrient deficiency causes Khaira disease in rice?"
+  Options: ["Zinc", "Iron", "Manganese", "Copper", "Boron"]
+- "What is the LD50 value of a pesticide an indicator of?"
+  Options: ["Acute toxicity", "Chronic toxicity", "Bioaccumulation", "Persistence", "Synergism"]
+- "Which method is used to determine available phosphorus in neutral to alkaline soils?"
+  Options: ["Olsen's", "Bray's", "Mehlich's", "Truog's", "Morgan's"]
+- "What is the recommended percentage of male plants in papaya orchard for proper pollination?"
+  Options: ["10%", "20%", "30%", "40%", "50%"]
+- "Which biotechnique was used to clone Dolly the sheep?"
+  Options: ["Somatic cell nuclear transfer", "Embryo splitting", "Gene editing", "Artificial insemination", "Cloning vector"]
 
 You MUST generate at least 15 questions, maximum 20.
 
@@ -216,7 +208,7 @@ def generate_questions(text_chunk):
     total_attempts = 0
     max_attempts = (len(OPENROUTER_KEYS) + len(GEMINI_KEYS) * len(GEMINI_MODELS))
 
-    # LAYER 1: OPENROUTER (auto free model)
+    # LAYER 1: OPENROUTER
     if OPENROUTER_KEYS:
         print(f"🌐 OpenRouter layer: {len(OPENROUTER_KEYS)} keys with auto model (temp={OPENROUTER_TEMPERATURE})")
         for key_idx, api_key in enumerate(OPENROUTER_KEYS):
@@ -224,7 +216,6 @@ def generate_questions(text_chunk):
             print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}")
             try:
                 response_text = call_openrouter(api_key, prompt)
-                # Clean response
                 clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
                 json_match = re.search(r'\[[\s\S]*\]', clean)
                 if json_match:
@@ -253,7 +244,7 @@ def generate_questions(text_chunk):
                 time.sleep(60)
                 continue
 
-    # LAYER 2: GEMINI (3 models)
+    # LAYER 2: GEMINI
     print(f"🤖 Gemini layer: {len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts (temp={GEMINI_TEMPERATURE})")
     for key_idx, api_key in enumerate(GEMINI_KEYS):
         for model in GEMINI_MODELS:
@@ -261,7 +252,6 @@ def generate_questions(text_chunk):
             print(f"🤖 Attempt {total_attempts}/{max_attempts}: Gemini key {key_idx}, model {model}")
             try:
                 gemini_client = genai.Client(api_key=api_key)
-                # Note: Gemini API uses generation_config for temperature
                 response = gemini_client.models.generate_content(
                     model=model,
                     contents=prompt,
@@ -309,7 +299,7 @@ def generate_questions(text_chunk):
         if "429" in str(test_err):
             print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
             wait_until_5_30_am_ist()
-    return generate_questions(text_chunk)  # Retry recursively
+    return generate_questions(text_chunk)
 
 # ==========================================
 # 8. MAIN LOOP
@@ -318,7 +308,6 @@ def main():
     keep_alive()
     print("🚀 Agri-Bot System Initiated.")
     
-    # Reset only once using MongoDB flag
     if not is_reset_done():
         reset_and_start_fresh()
     else:
@@ -338,7 +327,7 @@ def main():
         print(f"✅ PDF exists: {pdf}")
     
     print("\n" + "="*60)
-    print("📖 PROCESSING (3 pages/chunk, 15–20 professional questions)")
+    print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
     print(f"🌐 OpenRouter: {len(OPENROUTER_KEYS)} keys with auto model (temp={OPENROUTER_TEMPERATURE})")
     print(f"🤖 Gemini: {len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts (temp={GEMINI_TEMPERATURE})")
     print(f"🔁 Total attempts per chunk: {len(OPENROUTER_KEYS) + len(GEMINI_KEYS)*len(GEMINI_MODELS)}")
