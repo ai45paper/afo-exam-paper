@@ -72,13 +72,12 @@ def update_current_page(page_num):
     progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
     print(f"📌 Page tracker updated to {page_num}")
 
-def get_gemini_key(attempt):
-    key = GEMINI_KEYS[attempt % len(GEMINI_KEYS)].strip()
-    print(f"🔑 Using key index {attempt % len(GEMINI_KEYS)} (attempt {attempt})")
+def get_gemini_key(key_index):
+    key = GEMINI_KEYS[key_index % len(GEMINI_KEYS)].strip()
+    print(f"🔑 Using key index {key_index % len(GEMINI_KEYS)} (key attempt {key_index})")
     return key
 
 def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
-    """Extract text from a range of pages (max 3 pages per call)."""
     if not os.path.exists(pdf_path):
         return ""
     reader = pypdf.PdfReader(pdf_path)
@@ -99,20 +98,22 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text.strip() if text.strip() else ""
 
 # ==========================================
-# 4. AI GENERATION – ALL FREE MODELS + FALLBACK
+# 4. AI GENERATION – 5 MODELS × 9 KEYS (45 attempts)
 # ==========================================
-# All available free models in fallback order (newest first)
+# All available free models (in fallback order)
 FREE_MODELS = [
-    "gemini-3-flash",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-1.5-flash",
-    "gemini-1.5-pro"
+    "gemini-1.5-pro",
+    "gemini-3-flash"   # may not exist, but included for completeness
 ]
 
 def generate_questions(text_chunk, key_attempt=0, model_attempt=0):
-    """Generate 25-35 questions using model fallback and key rotation."""
-    # Limit text to avoid token overflow
+    """
+    Try models sequentially. After trying all models with current key,
+    move to next key. After all keys exhausted, wait 1 hour.
+    """
     truncated_text = text_chunk[:15000]
     
     prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO.
@@ -145,10 +146,12 @@ JSON template:
   }}
 ]"""
 
-    for idx in range(model_attempt, len(FREE_MODELS)):
-        model = FREE_MODELS[idx]
+    # Loop through models starting from current model_attempt
+    for m_idx in range(model_attempt, len(FREE_MODELS)):
+        model = FREE_MODELS[m_idx]
         try:
             client = genai.Client(api_key=get_gemini_key(key_attempt))
+            print(f"🤖 Trying model: {model} (key attempt {key_attempt}, model index {m_idx})")
             response = client.models.generate_content(model=model, contents=prompt)
             raw = response.text
             clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
@@ -157,41 +160,38 @@ JSON template:
                 questions = [questions]
             if len(questions) < 25:
                 print(f"⚠️ Only {len(questions)} questions – retrying same model (need 25+)")
-                time.sleep(5)
-                return generate_questions(text_chunk, key_attempt, idx)  # retry same model
+                time.sleep(10)  # 10 sec gap before retrying same model
+                return generate_questions(text_chunk, key_attempt, m_idx)  # retry same model
             print(f"✅ Generated {len(questions)} questions using {model}")
             return questions[:35]  # cap at 35
         except Exception as e:
             error_str = str(e)
-            print(f"⚠️ {model} failed: {error_str}")
-            # Handle 429 Quota Exhausted – wait 70 seconds
-            if "429" in error_str:
-                print("🚨 QUOTA EXHAUSTED: Waiting 70 seconds for reset...")
-                time.sleep(70)
-                # Switch to next key
-                if key_attempt < len(GEMINI_KEYS) - 1:
+            print(f"⚠️ {model} failed: {error_str[:200]}")
+            # If it's a 429 (quota) or 503 (overload), wait longer and switch key immediately
+            if "429" in error_str or "503" in error_str:
+                print("⏳ Quota/overload error. Waiting 60 seconds before switching key...")
+                time.sleep(60)
+                # Move to next key (reset model index to 0)
+                if key_attempt + 1 < len(GEMINI_KEYS) * len(FREE_MODELS):
+                    print(f"🔄 Switching to next key (key attempt {key_attempt+1})")
+                    time.sleep(60)  # 60 sec gap between key switches
                     return generate_questions(text_chunk, key_attempt + 1, 0)
                 else:
                     print("🚨 All keys exhausted. Waiting 1 hour...")
                     time.sleep(3600)
                     return generate_questions(text_chunk, 0, 0)
-            # For other errors (503, 404, etc.), switch key after a short delay
-            if key_attempt < len(GEMINI_KEYS) - 1:
-                print(f"🔄 Switching to next API key (error: {error_str[:100]})")
-                time.sleep(10)
-                return generate_questions(text_chunk, key_attempt + 1, 0)
-            else:
-                print("🚨 All keys exhausted. Waiting 1 hour...")
-                time.sleep(3600)
-                return generate_questions(text_chunk, 0, 0)
+            # For other errors (404, etc.), try next model within same key
+            print(f"⏳ Waiting 10 seconds before trying next model...")
+            time.sleep(10)  # 10 sec gap between model attempts
+            continue
     
-    # If all models tried with this key and none worked
-    if key_attempt < len(GEMINI_KEYS) - 1:
-        print(f"🔄 All models failed with key {key_attempt}. Switching to next key.")
-        time.sleep(10)
+    # If all models tried with this key, move to next key
+    if key_attempt + 1 < len(GEMINI_KEYS) * len(FREE_MODELS):
+        print(f"🔄 All models failed with key attempt {key_attempt}. Switching to next key (total attempts: {key_attempt+1})")
+        time.sleep(60)  # 60 sec gap when switching keys
         return generate_questions(text_chunk, key_attempt + 1, 0)
     else:
-        print("🚨 All keys exhausted. Waiting 1 hour before restart.")
+        print("🚨 All 45 attempts (9 keys × 5 models) exhausted. Waiting 1 hour before restart.")
         time.sleep(3600)
         return generate_questions(text_chunk, 0, 0)
 
@@ -225,6 +225,8 @@ def main():
     
     print("\n" + "="*60)
     print("📖 STARTING PAGE-BY-PAGE PROCESSING (3 pages per chunk, 25–35 questions)")
+    print("📋 Fallback: 5 models × 9 keys = 45 total attempts per chunk")
+    print("⏱️ Model gap: 10s | Key switch gap: 60s")
     print("="*60 + "\n")
     
     total_questions = 0
@@ -255,7 +257,7 @@ def main():
                 update_current_page(next_page)
                 continue
             
-            # Batch append to Google Sheets (all questions at once)
+            # Batch append to Google Sheets
             rows = []
             for q in questions:
                 rows.append([
