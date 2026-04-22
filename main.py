@@ -25,18 +25,20 @@ SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
+# OpenRouter Free Models (only reliable ones based on logs)
 OPENROUTER_MODELS = [
     "deepseek/deepseek-r1",
     "deepseek/deepseek-chat",
-    "qwen/qwen-72b",
     "meta-llama/llama-3-70b-instruct"
 ]
 
+# Gemini Models
 GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite"
 ]
 
+# Validation
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
     raise ValueError("❌ GEMINI_KEYS not set")
 if not MONGO_URI:
@@ -51,7 +53,7 @@ GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS if k.strip()]
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client['agri_data_bank']
 progress_collection = db['process_tracker']
-config_collection = db['config']  # for storing reset flag
+config_collection = db['config']
 print("✅ MongoDB Connection: SUCCESS")
 
 # Google Sheets
@@ -63,7 +65,7 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 2. RESET (ONLY ONCE – using MongoDB flag)
+# 2. RESET (ONLY ONCE, USING MONGO)
 # ==========================================
 def is_reset_done():
     doc = config_collection.find_one({"_id": "reset_flag"})
@@ -137,33 +139,39 @@ def call_openrouter(model, api_key, prompt):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+    # Reduce max_tokens to avoid 402 errors (credits issue)
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
-        "max_tokens": 4000
+        "max_tokens": 2000  # reduced from 4000 to save credits
     }
     response = requests.post(url, headers=headers, json=payload, timeout=120)
     if response.status_code == 200:
         return response.json()["choices"][0]["message"]["content"]
+    elif response.status_code == 402:
+        raise Exception("INSUFFICIENT_CREDITS")
     else:
         raise Exception(f"OpenRouter API error {response.status_code}: {response.text[:200]}")
 
 # ==========================================
-# 6. PROMPT (FULL AI BRAIN)
+# 6. PROFESSIONAL PROMPT (2+ LINES, AFO MAINS LEVEL)
 # ==========================================
 def build_prompt(text_chunk):
     truncated = text_chunk[:6000]
-    return f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO.
+    return f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
 Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
 
-CRITICAL RULES:
-- Questions MUST be 2-3 lines long. Do NOT use "According to the text".
-- Return ONLY valid JSON list (no markdown, no extra text).
-- Each object: section, question, opt1, opt2, opt3, opt4, opt5, answer.
-- Section should be subject (Agronomy, Soil Science, Horticulture, Genetics, etc.).
+CRITICAL RULES (STRICTLY FOLLOW):
+1. Each question MUST be at least 2 full lines long (40-80 words). Never use single-line or very short questions.
+2. Options (opt1 to opt5) must be conceptually challenging, not obvious. They should be plausible distractors.
+3. Question tone must be professional, direct, and exam‑oriented – as in AFO Mains.
+4. Do NOT use phrases like "According to the text" or "Based on the above".
+5. Return ONLY a valid JSON list (no markdown, no extra text, no explanation).
+6. Each object must have exactly: section, question, opt1, opt2, opt3, opt4, opt5, answer.
+7. Section should be the subject (Agronomy, Soil Science, Horticulture, Genetics, Plant Pathology, etc.).
 
-STYLE EXAMPLES (match this tone exactly):
+STYLE EXAMPLES (match this length and complexity):
 - "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
 - "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
 - "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
@@ -219,7 +227,12 @@ def generate_questions(text_chunk):
                 print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}, model {model}")
                 try:
                     response_text = call_openrouter(model, api_key, prompt)
+                    # Clean response
                     clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
+                    # Try to extract JSON if there's extra text
+                    json_match = re.search(r'\[[\s\S]*\]', clean)
+                    if json_match:
+                        clean = json_match.group(0)
                     questions = json.loads(clean)
                     if not isinstance(questions, list):
                         questions = [questions]
@@ -230,7 +243,16 @@ def generate_questions(text_chunk):
                     print(f"✅ Generated {len(questions)} questions using OpenRouter/{model}")
                     return questions[:20]
                 except Exception as e:
-                    print(f"⚠️ OpenRouter {model} failed: {str(e)[:150]}")
+                    err = str(e)
+                    print(f"⚠️ OpenRouter {model} failed: {err[:150]}")
+                    if "INSUFFICIENT_CREDITS" in err or "402" in err:
+                        print("⏳ Insufficient credits for this model. Moving to next model/key.")
+                        time.sleep(10)
+                        continue
+                    if "JSON" in err or "Expecting value" in err:
+                        print("⏳ JSON parse error. Moving to next model/key.")
+                        time.sleep(10)
+                        continue
                     print("⏳ Waiting 60 seconds before next attempt...")
                     time.sleep(60)
                     continue
@@ -246,6 +268,9 @@ def generate_questions(text_chunk):
                 response = gemini_client.models.generate_content(model=model, contents=prompt)
                 raw = response.text
                 clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
+                json_match = re.search(r'\[[\s\S]*\]', clean)
+                if json_match:
+                    clean = json_match.group(0)
                 questions = json.loads(clean)
                 if not isinstance(questions, list):
                     questions = [questions]
@@ -276,7 +301,7 @@ def generate_questions(text_chunk):
         if "429" in str(test_err):
             print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
             wait_until_5_30_am_ist()
-    return generate_questions(text_chunk)
+    return generate_questions(text_chunk)  # Retry recursively
 
 # ==========================================
 # 8. MAIN LOOP
@@ -309,7 +334,7 @@ def main():
     print(f"🌐 Layer 1: OpenRouter ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS)} attempts)")
     print(f"🤖 Layer 2: Gemini ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts)")
     print(f"🔁 Total attempts: {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS) + len(GEMINI_KEYS)*len(GEMINI_MODELS)} per chunk")
-    print("⏱️ Each attempt gap: 60s")
+    print("⏱️ Each attempt gap: 60s (or less for non-quota errors)")
     print("🚨 After all fails: wait 1h, then if still 429 wait until 5:30 AM IST")
     print("="*60 + "\n")
     
