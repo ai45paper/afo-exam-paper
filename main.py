@@ -153,52 +153,56 @@ def call_openrouter(api_key, prompt):
         raise Exception(f"OpenRouter error {response.status_code}: {response.text[:200]}")
 
 # ==========================================
-# 6. PROFESSIONAL PROMPT – SHORT Q & SHORT OPTIONS
+# 6. PROMPT – EXACTLY MATCHING YOUR INITIAL EXAMPLES
 # ==========================================
 def build_prompt(text_chunk):
     truncated = text_chunk[:6000]
     return f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
 Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
 
-CRITICAL RULES (STRICTLY FOLLOW):
-1. Each question MUST be **at most 2 lines** (concise, to the point). Never make questions longer than 2 lines.
-2. Options (opt1 to opt5) must be **very short** – preferably 1 to 3 words, or a short phrase (e.g., "Fluchloralin", "Pre-emergence", "2 kg/ha", "At sowing", "Root uptake"). Do NOT write long sentences as options.
-3. Question tone: professional, direct, exam‑oriented (like AFO Mains).
-4. Do NOT use phrases like "According to the text" or "Based on the above".
-5. Return ONLY a valid JSON list (no markdown, no extra text, no explanation).
-6. Each object must have exactly: section, question, opt1, opt2, opt3, opt4, opt5, answer.
-7. Section should be the subject (Agronomy, Soil Science, Horticulture, Genetics, Plant Pathology, etc.).
+CRITICAL RULES:
+1. Level: MODERATE (conceptual and professional).
+2. Questions MUST be 2 to 3 lines long (exactly like the examples below). DO NOT use phrases like "According to the text".
+3. Return ONLY a valid JSON list. No code blocks, no markdown, no text explanations.
+4. Provide exactly 5 options (opt1 to opt5). Options should be meaningful and exam‑oriented (not too short, not too long – similar to the examples).
+5. Section Detection: Detect the subject (Agronomy, Soil Science, Horticulture, Genetics, etc.).
 
-STYLE EXAMPLES (short questions, short options):
-- "Which herbicide is used as pre‑emergence in sunflower at 2 kg ha⁻¹?"
-  Options: ["Fluchloralin", "Pendimethalin", "Atrazine", "Glyphosate", "2,4-D"]
-- "What is the critical timing for pre‑emergence herbicide application to avoid crop injury?"
-  Options: ["Before sowing", "At sowing", "After emergence", "At flowering", "At maturity"]
-- "Which nutrient deficiency causes Khaira disease in rice?"
-  Options: ["Zinc", "Iron", "Manganese", "Copper", "Boron"]
-- "What is the LD50 value of a pesticide an indicator of?"
-  Options: ["Acute toxicity", "Chronic toxicity", "Bioaccumulation", "Persistence", "Synergism"]
-- "Which method is used to determine available phosphorus in neutral to alkaline soils?"
-  Options: ["Olsen's", "Bray's", "Mehlich's", "Truog's", "Morgan's"]
-- "What is the recommended percentage of male plants in papaya orchard for proper pollination?"
-  Options: ["10%", "20%", "30%", "40%", "50%"]
-- "Which biotechnique was used to clone Dolly the sheep?"
-  Options: ["Somatic cell nuclear transfer", "Embryo splitting", "Gene editing", "Artificial insemination", "Cloning vector"]
+STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT – these are the questions you gave initially):
+- "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
+- "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
+- "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
+- "The traditional shifting cultivation system known as Jhum is also referred to as 'Bewar' and 'Dahiya.' In which Indian state are these local names used?"
+- "In papaya cultivation, a proportion of male plants must be retained to ensure adequate pollination for fruit development. What is the recommended percentage of male plants?"
+- "Among domestic animals, cow milk is known to be comparatively low in which essential mineral, making supplementation important for infants and certain populations?"
+- "LD50 is a standard toxicological parameter used to express the potency of pesticides. What does LD50 specifically measure?"
+- "Olsen's extractant method is widely used to determine the availability of which nutrient in neutral to alkaline soils?"
+- "Anthrax, a highly contagious disease affecting livestock, can also be transmitted to humans. By what alternate name is this zoonotic disease known?"
+- "Blanching of vegetables prior to freezing is carried out primarily to achieve which purpose?"
+- "Which organization in India specifically focuses on strengthening and promoting small-scale shrimp farming through technical support and cooperative development?"
+- "Which Indian buffalo breed is regarded as the best globally due to milk production and is extensively used for grading up various local buffalo populations?"
+- "The certification required to declare plants or planting material as disease-free for international export is known as which certificate?"
+- "Which prestigious North Indian mango cultivar is famous for its sweet flavour, pleasant aroma, fiberless pulp, thin stone, and excellent transport quality?"
+- "What is the primary advantage of vegetative (clonal) propagation of plants compared to seed propagation?"
+- "Which of the following statements is NOT correct regarding forest soils?"
+- "In diffusion of innovations, what term is used for the group of individuals who are traditional and the last to adopt new technology and often show resistance until the idea is fully established?"
+- "A mating or crossing between two individuals differing in only one pair of contrasting alleles results in which type of genetic cross?"
+- "The stable, dark, amorphous, colloidal product of organic matter decomposition that is resistant to microbial breakdown is known as what?"
+- "The conversion of nitrite or nitrate into gaseous nitrogen during the nitrogen cycle is known as what process?"
+- "The certification tag colour associated with Foundation Seed under seed certification standards is which of the following?"
 
-You MUST generate at least 15 questions, maximum 20.
-
-Text source:
-{truncated}
-
-JSON template:
+JSON Template:
 [
   {{
     "section": "Agronomy",
-    "question": "...",
-    "opt1": "...", "opt2": "...", "opt3": "...", "opt4": "...", "opt5": "...",
-    "answer": "..."
+    "question": "Question text...",
+    "opt1": "Choice A", "opt2": "Choice B", "opt3": "Choice C", "opt4": "Choice D", "opt5": "Choice E",
+    "answer": "Correct Choice"
   }}
-]"""
+]
+
+Text Source:
+{truncated}
+"""
 
 # ==========================================
 # 7. GENERATE QUESTIONS (OPENROUTER + GEMINI)
