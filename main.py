@@ -8,13 +8,7 @@ from pymongo import MongoClient
 from google import genai
 import pypdf
 import gdown
-
-# Optional keep_alive – define dummy if file missing
-try:
-    from keep_alive import keep_alive
-except ImportError:
-    def keep_alive():
-        pass
+from keep_alive import keep_alive   # your separate file
 
 # ==========================================
 # 1. CONFIGURATION & ENVIRONMENT SETUP
@@ -115,7 +109,7 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text if text.strip() else ""
 
 # ==========================================
-# 3. AI GENERATION LOGIC (UPDATED MODELS)
+# 3. AI GENERATION LOGIC
 # ==========================================
 def generate_questions(text_chunk, key_attempt=0):
     try:
@@ -132,29 +126,6 @@ CRITICAL RULES:
 4. Provide exactly 5 options (opt1 to opt5).
 5. Section Detection: Detect the subject (Agronomy, Soil Science, Horticulture, Genetics, etc.).
 
-STYLE EXAMPLES (YOUR BRAIN MUST MATCH THIS EXACT TONE AND FORMAT):
-- "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
-- "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
-- "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
-- "The traditional shifting cultivation system known as Jhum is also referred to as 'Bewar' and 'Dahiya.' In which Indian state are these local names used?"
-- "In papaya cultivation, a proportion of male plants must be retained to ensure adequate pollination for fruit development. What is the recommended percentage of male plants?"
-- "Among domestic animals, cow milk is known to be comparatively low in which essential mineral, making supplementation important for infants and certain populations?"
-- "LD50 is a standard toxicological parameter used to express the potency of pesticides. What does LD50 specifically measure?"
-- "Olsen’s extractant method is widely used to determine the availability of which nutrient in neutral to alkaline soils?"
-- "Anthrax, a highly contagious disease affecting livestock, can also be transmitted to humans. By what alternate name is this zoonotic disease known?"
-- "Blanching of vegetables prior to freezing is carried out primarily to achieve which purpose?"
-- "Which organization in India specifically focuses on strengthening and promoting small-scale shrimp farming through technical support and cooperative development?"
-- "Which Indian buffalo breed is regarded as the best globally due to milk production and is extensively used for grading up various local buffalo populations?"
-- "The certification required to declare plants or planting material as disease-free for international export is known as which certificate?"
-- "Which prestigious North Indian mango cultivar is famous for its sweet flavour, pleasant aroma, fiberless pulp, thin stone, and excellent transport quality?"
-- "What is the primary advantage of vegetative (clonal) propagation of plants compared to seed propagation?"
-- "Which of the following statements is NOT correct regarding forest soils?"
-- "In diffusion of innovations, what term is used for the group of individuals who are traditional and the last to adopt new technology and often show resistance until the idea is fully established?"
-- "A mating or crossing between two individuals differing in only one pair of contrasting alleles results in which type of genetic cross?"
-- "The stable, dark, amorphous, colloidal product of organic matter decomposition that is resistant to microbial breakdown is known as what?"
-- "The conversion of nitrite or nitrate into gaseous nitrogen during the nitrogen cycle is known as what process?"
-- "The certification tag colour associated with Foundation Seed under seed certification standards is which of the following?"
-
 JSON Template:
 [
   {{
@@ -169,7 +140,6 @@ Text Source:
 {text_chunk}
 """
         
-        # Use only existing Gemini models
         models_to_try = ['gemini-1.5-flash', 'gemini-2.0-flash']
         response_text = None
         
@@ -180,13 +150,12 @@ Text Source:
                 print(f"🤖 Generated using model: {model_name}")
                 break
             except Exception as model_err:
-                print(f"⚠️ Model {model_name} failed. Trying fallback...")
+                print(f"⚠️ Model {model_name} failed: {model_err}")
                 continue
         
         if not response_text:
             raise Exception("All fallback Gemini models failed.")
         
-        # Clean Markdown
         clean_text = re.sub(r'```json\n|\n```|```', '', response_text).strip()
         questions = json.loads(clean_text)
         
@@ -215,10 +184,10 @@ Text Source:
             return generate_questions(text_chunk, 0)
 
 # ==========================================
-# 4. MAIN ENGINE (FIXED INDENTATION)
+# 4. MAIN ENGINE (ALL LOGIC INSIDE main() )
 # ==========================================
 def main():
-    keep_alive()
+    keep_alive()   # starts the Flask server in background
     print("🚀 Agri-Bot System Initiated.")
     
     pdf_filename = "book.pdf"
@@ -238,9 +207,9 @@ def main():
                 raise Exception("File not found after download attempt.")
         except Exception as e:
             print(f"❌ CRITICAL ERROR: Download Failed! -> {e}")
-            return  # Stop execution if PDF missing
+            return  # Stop if PDF missing
 
-    # Process Pages
+    # Process Pages – THIS LOOP MUST BE INSIDE main()
     page_count = 0
     error_count = 0
     MAX_ERRORS = 5
@@ -280,7 +249,7 @@ def main():
                         page_count += len(questions)
                         error_count = 0
                         
-                        # ✅ ONLY update page tracker on success
+                        # Update progress only on success
                         update_current_page(next_page)
                     except Exception as sheet_error:
                         print(f"❌ Sheet Update Error: {sheet_error}")
@@ -289,7 +258,7 @@ def main():
                             print("🚨 Too many errors. Stopping execution.")
                             break
             else:
-                # Not enough text – still advance to avoid infinite loop
+                # Not enough text – advance to avoid infinite loop
                 update_current_page(next_page)
             
             print("⏳ Pause for 2 minutes (Protecting Tokens)...")
