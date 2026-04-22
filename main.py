@@ -4,7 +4,7 @@ import json
 import time
 import re
 from datetime import datetime, timedelta
-import requests  # For OpenRouter API calls
+import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
@@ -18,38 +18,37 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-# OpenRouter Keys (3 keys)
 OPENROUTER_KEYS = os.getenv("OPENROUTER_KEYS", "").split(",")
-# Gemini Keys (9 keys)
 GEMINI_KEYS = os.getenv("GEMINI_KEYS", "").split(",")
 MONGO_URI = os.getenv("MONGO_URI")
 SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
-# OpenRouter Free Models (4 models)
+# OpenRouter Free Models (correct IDs without :free)
 OPENROUTER_MODELS = [
-    "deepseek/deepseek-r1:free",      # DeepSeek R1
-    "deepseek/deepseek-chat:free",    # DeepSeek V3
-    "qwen/qwen-72b:free",             # Qwen 72B
-    "meta-llama/llama-3-70b-instruct:free"  # Llama 70B
+    "deepseek/deepseek-r1",
+    "deepseek/deepseek-chat",
+    "qwen/qwen-72b",
+    "meta-llama/llama-3-70b-instruct"
 ]
 
-# Gemini Working Models (2 models)
+# Gemini Working Models
 GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite"
 ]
 
-if not OPENROUTER_KEYS or OPENROUTER_KEYS == ['']:
-    print("⚠️ No OpenRouter keys found. Skipping OpenRouter layer.")
-    OPENROUTER_KEYS = []
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
     raise ValueError("❌ GEMINI_KEYS not set")
 if not MONGO_URI:
     raise ValueError("❌ MONGO_URI not set")
 if not SERVICE_ACCOUNT_JSON:
     raise ValueError("❌ SERVICE_ACCOUNT_JSON not set")
+
+# Remove empty strings from keys
+OPENROUTER_KEYS = [k.strip() for k in OPENROUTER_KEYS if k.strip()]
+GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS if k.strip()]
 
 # MongoDB
 client = MongoClient(MONGO_URI)
@@ -124,10 +123,9 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text.strip() if text.strip() else ""
 
 # ==========================================
-# 5. OPENROUTER API CALL (with 60s gap on failure)
+# 5. OPENROUTER API CALL
 # ==========================================
 def call_openrouter(model, api_key, prompt):
-    """Call OpenRouter API with OpenAI-compatible format."""
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -135,9 +133,7 @@ def call_openrouter(model, api_key, prompt):
     }
     payload = {
         "model": model,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
         "max_tokens": 4000
     }
@@ -148,12 +144,11 @@ def call_openrouter(model, api_key, prompt):
         raise Exception(f"OpenRouter API error {response.status_code}: {response.text[:200]}")
 
 # ==========================================
-# 6. AI GENERATION – OPENROUTER + GEMINI FALLBACK
+# 6. PROMPT (FULL AI BRAIN)
 # ==========================================
-def generate_questions(text_chunk):
+def build_prompt(text_chunk):
     truncated = text_chunk[:6000]
-    
-    prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO.
+    return f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO.
 Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
 
 CRITICAL RULES:
@@ -200,46 +195,48 @@ JSON template:
   }}
 ]"""
 
+# ==========================================
+# 7. GENERATE QUESTIONS (OPENROUTER + GEMINI FALLBACK)
+# ==========================================
+def generate_questions(text_chunk):
+    prompt = build_prompt(text_chunk)
     total_attempts = 0
-    max_attempts = len(OPENROUTER_KEYS) * len(OPENROUTER_MODELS) + len(GEMINI_KEYS) * len(GEMINI_MODELS)
-    
-    # ========== LAYER 1: OPENROUTER (3 keys × 4 models = 12 attempts) ==========
+    max_attempts = (len(OPENROUTER_KEYS) * len(OPENROUTER_MODELS) +
+                    len(GEMINI_KEYS) * len(GEMINI_MODELS))
+
+    # ---------- LAYER 1: OPENROUTER ----------
     if OPENROUTER_KEYS:
-        print(f"🌐 Trying OpenRouter layer ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS) * len(OPENROUTER_MODELS)} attempts)")
+        print(f"🌐 Trying OpenRouter layer ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS)} attempts)")
         for key_idx, api_key in enumerate(OPENROUTER_KEYS):
-            if not api_key or api_key.strip() == "":
-                continue
-            for model_idx, model in enumerate(OPENROUTER_MODELS):
+            for model in OPENROUTER_MODELS:
                 total_attempts += 1
                 print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}, model {model}")
                 try:
-                    response_text = call_openrouter(model, api_key.strip(), prompt)
+                    response_text = call_openrouter(model, api_key, prompt)
                     clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
                     questions = json.loads(clean)
                     if not isinstance(questions, list):
                         questions = [questions]
                     if len(questions) < 15:
                         print(f"⚠️ Only {len(questions)} questions, retrying same model...")
-                        time.sleep(60)  # 60s gap before retry
+                        time.sleep(60)
                         continue
                     print(f"✅ Generated {len(questions)} questions using OpenRouter/{model}")
                     return questions[:20]
                 except Exception as e:
                     print(f"⚠️ OpenRouter {model} failed: {str(e)[:150]}")
                     print("⏳ Waiting 60 seconds before next attempt...")
-                    time.sleep(60)  # 60s gap on failure
+                    time.sleep(60)
                     continue
-    
-    # ========== LAYER 2: GEMINI (9 keys × 2 models = 18 attempts) ==========
-    print(f"🤖 OpenRouter layer exhausted. Switching to Gemini layer ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS) * len(GEMINI_MODELS)} attempts)")
+
+    # ---------- LAYER 2: GEMINI ----------
+    print(f"🤖 OpenRouter layer exhausted. Switching to Gemini layer ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts)")
     for key_idx, api_key in enumerate(GEMINI_KEYS):
-        if not api_key or api_key.strip() == "":
-            continue
-        for model_idx, model in enumerate(GEMINI_MODELS):
+        for model in GEMINI_MODELS:
             total_attempts += 1
             print(f"🤖 Attempt {total_attempts}/{max_attempts}: Gemini key {key_idx}, model {model}")
             try:
-                gemini_client = genai.Client(api_key=api_key.strip())
+                gemini_client = genai.Client(api_key=api_key)
                 response = gemini_client.models.generate_content(model=model, contents=prompt)
                 raw = response.text
                 clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
@@ -262,13 +259,13 @@ JSON template:
                 print("⏳ Waiting 10 seconds...")
                 time.sleep(10)
                 continue
-    
-    # ========== ALL 30 ATTEMPTS EXHAUSTED ==========
+
+    # ---------- ALL ATTEMPTS EXHAUSTED ----------
     print(f"🚨 All {max_attempts} attempts exhausted. Waiting 1 hour...")
     time.sleep(3600)
-    # Check if quota still exhausted
+    # Test if Gemini quota still exhausted
     try:
-        test_client = genai.Client(api_key=GEMINI_KEYS[0].strip())
+        test_client = genai.Client(api_key=GEMINI_KEYS[0])
         test_client.models.generate_content(model=GEMINI_MODELS[0], contents="test")
     except Exception as test_err:
         if "429" in str(test_err):
@@ -277,7 +274,7 @@ JSON template:
     return generate_questions(text_chunk)  # Retry recursively
 
 # ==========================================
-# 7. MAIN LOOP
+# 8. MAIN LOOP
 # ==========================================
 def main():
     keep_alive()
@@ -306,11 +303,11 @@ def main():
     
     print("\n" + "="*60)
     print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
-    print("🌐 Layer 1: OpenRouter (3 keys × 4 models = 12 attempts)")
-    print("🤖 Layer 2: Gemini (9 keys × 2 models = 18 attempts)")
-    print("🔁 Total attempts: 30 per chunk")
+    print(f"🌐 Layer 1: OpenRouter ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS)} attempts)")
+    print(f"🤖 Layer 2: Gemini ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts)")
+    print(f"🔁 Total attempts: {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS) + len(GEMINI_KEYS)*len(GEMINI_MODELS)} per chunk")
     print("⏱️ Each attempt gap: 60s")
-    print("🚨 After 30 fails: wait 1h, then if still 429 wait until 5:30 AM IST")
+    print("🚨 After all fails: wait 1h, then if still 429 wait until 5:30 AM IST")
     print("="*60 + "\n")
     
     total_q = 0
