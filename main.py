@@ -4,6 +4,7 @@ import json
 import time
 import re
 from datetime import datetime, timedelta
+import requests  # For OpenRouter API calls
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
@@ -17,12 +18,32 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
+# OpenRouter Keys (3 keys)
+OPENROUTER_KEYS = os.getenv("OPENROUTER_KEYS", "").split(",")
+# Gemini Keys (9 keys)
 GEMINI_KEYS = os.getenv("GEMINI_KEYS", "").split(",")
 MONGO_URI = os.getenv("MONGO_URI")
 SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
+# OpenRouter Free Models (4 models)
+OPENROUTER_MODELS = [
+    "deepseek/deepseek-r1:free",      # DeepSeek R1
+    "deepseek/deepseek-chat:free",    # DeepSeek V3
+    "qwen/qwen-72b:free",             # Qwen 72B
+    "meta-llama/llama-3-70b-instruct:free"  # Llama 70B
+]
+
+# Gemini Working Models (2 models)
+GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite"
+]
+
+if not OPENROUTER_KEYS or OPENROUTER_KEYS == ['']:
+    print("⚠️ No OpenRouter keys found. Skipping OpenRouter layer.")
+    OPENROUTER_KEYS = []
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
     raise ValueError("❌ GEMINI_KEYS not set")
 if not MONGO_URI:
@@ -68,12 +89,10 @@ def reset_and_start_fresh():
     print("✅ Reset complete. Starting from page 0.")
 
 # ==========================================
-# 3. WAIT UNTIL 5:30 AM IST (without pytz)
+# 3. WAIT UNTIL 5:30 AM IST
 # ==========================================
 def wait_until_5_30_am_ist():
-    # IST = UTC + 5:30
     now_utc = datetime.utcnow()
-    # Convert to IST
     now_ist = now_utc + timedelta(hours=5, minutes=30)
     target_ist = now_ist.replace(hour=5, minute=30, second=0, microsecond=0)
     if now_ist >= target_ist:
@@ -83,22 +102,7 @@ def wait_until_5_30_am_ist():
     time.sleep(wait_seconds)
 
 # ==========================================
-# 4. GEMINI CLIENT (REUSED)
-# ==========================================
-current_key_index = -1
-gemini_client = None
-
-def get_gemini_client(key_index):
-    global current_key_index, gemini_client
-    if current_key_index != key_index:
-        current_key_index = key_index
-        key = GEMINI_KEYS[key_index % len(GEMINI_KEYS)].strip()
-        gemini_client = genai.Client(api_key=key)
-        print(f"🔑 Using key index {key_index % len(GEMINI_KEYS)}")
-    return gemini_client
-
-# ==========================================
-# 5. PDF EXTRACTION (3 PAGES)
+# 4. PDF EXTRACTION (3 PAGES)
 # ==========================================
 def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     if not os.path.exists(pdf_path):
@@ -120,16 +124,33 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text.strip() if text.strip() else ""
 
 # ==========================================
-# 6. AI GENERATION – 4 MODELS, 36 ATTEMPTS
+# 5. OPENROUTER API CALL (with 60s gap on failure)
 # ==========================================
-MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite"
-]
+def call_openrouter(model, api_key, prompt):
+    """Call OpenRouter API with OpenAI-compatible format."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 4000
+    }
+    response = requests.post(url, headers=headers, json=payload, timeout=120)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"]
+    else:
+        raise Exception(f"OpenRouter API error {response.status_code}: {response.text[:200]}")
 
-def generate_questions(text_chunk, key_attempt=0, model_attempt=0):
+# ==========================================
+# 6. AI GENERATION – OPENROUTER + GEMINI FALLBACK
+# ==========================================
+def generate_questions(text_chunk):
     truncated = text_chunk[:6000]
     
     prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO.
@@ -179,68 +200,81 @@ JSON template:
   }}
 ]"""
 
-    for m_idx in range(model_attempt, len(MODELS)):
-        model = MODELS[m_idx]
-        try:
-            client = get_gemini_client(key_attempt)
-            response = client.models.generate_content(model=model, contents=prompt)
-            raw = response.text
-            clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
-            questions = json.loads(clean)
-            if not isinstance(questions, list):
-                questions = [questions]
-            if len(questions) < 15:
-                print(f"⚠️ Only {len(questions)} questions, retrying same model...")
-                time.sleep(60)  # 1 min gap for retry same model
-                return generate_questions(text_chunk, key_attempt, m_idx)
-            print(f"✅ Generated {len(questions)} questions using {model}")
-            return questions[:20]
-        except Exception as e:
-            err = str(e)
-            print(f"⚠️ {model} failed: {err[:150]}")
-            if "429" in err or "503" in err:
-                print("⏳ Quota/overload. Waiting 60s then next key...")
-                time.sleep(60)
-                # Move to next key, reset model index
-                if key_attempt + 1 < len(GEMINI_KEYS) * len(MODELS):
-                    return generate_questions(text_chunk, key_attempt + 1, 0)
-                else:
-                    # All 36 attempts exhausted
-                    print("🚨 All 36 attempts failed due to quota. Waiting 1 hour...")
-                    time.sleep(3600)
-                    # After 1 hour, if still quota issue, wait until 5:30 AM IST
-                    print("⏳ Checking if quota reset...")
-                    try:
-                        test_client = get_gemini_client(0)
-                        test_client.models.generate_content(model=MODELS[0], contents="test")
-                    except Exception as test_err:
-                        if "429" in str(test_err):
-                            print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
-                            wait_until_5_30_am_ist()
-                    return generate_questions(text_chunk, 0, 0)
-            # For other errors (404, etc.) wait 10s then next model within same key
-            print("⏳ Waiting 10s then next model...")
-            time.sleep(10)
+    total_attempts = 0
+    max_attempts = len(OPENROUTER_KEYS) * len(OPENROUTER_MODELS) + len(GEMINI_KEYS) * len(GEMINI_MODELS)
+    
+    # ========== LAYER 1: OPENROUTER (3 keys × 4 models = 12 attempts) ==========
+    if OPENROUTER_KEYS:
+        print(f"🌐 Trying OpenRouter layer ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS) * len(OPENROUTER_MODELS)} attempts)")
+        for key_idx, api_key in enumerate(OPENROUTER_KEYS):
+            if not api_key or api_key.strip() == "":
+                continue
+            for model_idx, model in enumerate(OPENROUTER_MODELS):
+                total_attempts += 1
+                print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}, model {model}")
+                try:
+                    response_text = call_openrouter(model, api_key.strip(), prompt)
+                    clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
+                    questions = json.loads(clean)
+                    if not isinstance(questions, list):
+                        questions = [questions]
+                    if len(questions) < 15:
+                        print(f"⚠️ Only {len(questions)} questions, retrying same model...")
+                        time.sleep(60)  # 60s gap before retry
+                        continue
+                    print(f"✅ Generated {len(questions)} questions using OpenRouter/{model}")
+                    return questions[:20]
+                except Exception as e:
+                    print(f"⚠️ OpenRouter {model} failed: {str(e)[:150]}")
+                    print("⏳ Waiting 60 seconds before next attempt...")
+                    time.sleep(60)  # 60s gap on failure
+                    continue
+    
+    # ========== LAYER 2: GEMINI (9 keys × 2 models = 18 attempts) ==========
+    print(f"🤖 OpenRouter layer exhausted. Switching to Gemini layer ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS) * len(GEMINI_MODELS)} attempts)")
+    for key_idx, api_key in enumerate(GEMINI_KEYS):
+        if not api_key or api_key.strip() == "":
             continue
-
-    # All models tried with this key -> next key
-    if key_attempt + 1 < len(GEMINI_KEYS) * len(MODELS):
-        print(f"🔄 Switching to next key (total attempts {key_attempt+1})")
-        time.sleep(60)  # 1 min gap before switching key
-        return generate_questions(text_chunk, key_attempt + 1, 0)
-    else:
-        # All 36 attempts exhausted
-        print("🚨 All 36 attempts failed. Waiting 1 hour...")
-        time.sleep(3600)
-        # After 1 hour, try again; if still 429, wait until 5:30 AM
-        try:
-            test_client = get_gemini_client(0)
-            test_client.models.generate_content(model=MODELS[0], contents="test")
-        except Exception as test_err:
-            if "429" in str(test_err):
-                print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
-                wait_until_5_30_am_ist()
-        return generate_questions(text_chunk, 0, 0)
+        for model_idx, model in enumerate(GEMINI_MODELS):
+            total_attempts += 1
+            print(f"🤖 Attempt {total_attempts}/{max_attempts}: Gemini key {key_idx}, model {model}")
+            try:
+                gemini_client = genai.Client(api_key=api_key.strip())
+                response = gemini_client.models.generate_content(model=model, contents=prompt)
+                raw = response.text
+                clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
+                questions = json.loads(clean)
+                if not isinstance(questions, list):
+                    questions = [questions]
+                if len(questions) < 15:
+                    print(f"⚠️ Only {len(questions)} questions, retrying same model...")
+                    time.sleep(60)
+                    continue
+                print(f"✅ Generated {len(questions)} questions using Gemini/{model}")
+                return questions[:20]
+            except Exception as e:
+                err = str(e)
+                print(f"⚠️ Gemini {model} failed: {err[:150]}")
+                if "429" in err or "503" in err:
+                    print("⏳ Quota/overload. Waiting 60 seconds...")
+                    time.sleep(60)
+                    continue
+                print("⏳ Waiting 10 seconds...")
+                time.sleep(10)
+                continue
+    
+    # ========== ALL 30 ATTEMPTS EXHAUSTED ==========
+    print(f"🚨 All {max_attempts} attempts exhausted. Waiting 1 hour...")
+    time.sleep(3600)
+    # Check if quota still exhausted
+    try:
+        test_client = genai.Client(api_key=GEMINI_KEYS[0].strip())
+        test_client.models.generate_content(model=GEMINI_MODELS[0], contents="test")
+    except Exception as test_err:
+        if "429" in str(test_err):
+            print("⚠️ Quota still exhausted. Waiting until 5:30 AM IST.")
+            wait_until_5_30_am_ist()
+    return generate_questions(text_chunk)  # Retry recursively
 
 # ==========================================
 # 7. MAIN LOOP
@@ -272,10 +306,11 @@ def main():
     
     print("\n" + "="*60)
     print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
-    print("📋 Models: 2.0-flash, 2.0-lite, 2.5-flash, 2.5-lite")
-    print("🔁 Total attempts per chunk: 9 keys × 4 models = 36")
-    print("⏱️ Each attempt gap: 60s (on quota) or 10s (other errors)")
-    print("🚨 After 36 fails: wait 1h, then if still 429 wait until 5:30 AM IST")
+    print("🌐 Layer 1: OpenRouter (3 keys × 4 models = 12 attempts)")
+    print("🤖 Layer 2: Gemini (9 keys × 2 models = 18 attempts)")
+    print("🔁 Total attempts: 30 per chunk")
+    print("⏱️ Each attempt gap: 60s")
+    print("🚨 After 30 fails: wait 1h, then if still 429 wait until 5:30 AM IST")
     print("="*60 + "\n")
     
     total_q = 0
