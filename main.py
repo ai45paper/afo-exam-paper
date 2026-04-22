@@ -25,18 +25,17 @@ SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
 DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
-# OpenRouter Free Models (only reliable ones based on logs)
-OPENROUTER_MODELS = [
-    "deepseek/deepseek-r1",
-    "deepseek/deepseek-chat",
-    "meta-llama/llama-3-70b-instruct"
-]
+# OpenRouter: auto‑select free model
+OPENROUTER_MODEL = "openrouter/free"
+OPENROUTER_TEMPERATURE = 0.4   # best for exam questions
 
-# Gemini Models
+# Gemini models (as requested)
 GEMINI_MODELS = [
     "gemini-2.0-flash",
-    "gemini-2.0-flash-lite"
+    "gemini-1.5-flash",
+    "gemini-1.5-pro"
 ]
+GEMINI_TEMPERATURE = 0.4        # consistent with OpenRouter
 
 # Validation
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
@@ -46,6 +45,7 @@ if not MONGO_URI:
 if not SERVICE_ACCOUNT_JSON:
     raise ValueError("❌ SERVICE_ACCOUNT_JSON not set")
 
+# Clean keys
 OPENROUTER_KEYS = [k.strip() for k in OPENROUTER_KEYS if k.strip()]
 GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS if k.strip()]
 
@@ -65,7 +65,7 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 2. RESET (ONLY ONCE, USING MONGO)
+# 2. RESET (ONLY ONCE – MONGO FLAG)
 # ==========================================
 def is_reset_done():
     doc = config_collection.find_one({"_id": "reset_flag"})
@@ -131,20 +131,19 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
     return text.strip() if text.strip() else ""
 
 # ==========================================
-# 5. OPENROUTER API CALL
+# 5. OPENROUTER API CALL (with temperature)
 # ==========================================
-def call_openrouter(model, api_key, prompt):
+def call_openrouter(api_key, prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    # Reduce max_tokens to avoid 402 errors (credits issue)
     payload = {
-        "model": model,
+        "model": OPENROUTER_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 2000  # reduced from 4000 to save credits
+        "temperature": OPENROUTER_TEMPERATURE,
+        "max_tokens": 2000
     }
     response = requests.post(url, headers=headers, json=payload, timeout=120)
     if response.status_code == 200:
@@ -152,10 +151,10 @@ def call_openrouter(model, api_key, prompt):
     elif response.status_code == 402:
         raise Exception("INSUFFICIENT_CREDITS")
     else:
-        raise Exception(f"OpenRouter API error {response.status_code}: {response.text[:200]}")
+        raise Exception(f"OpenRouter error {response.status_code}: {response.text[:200]}")
 
 # ==========================================
-# 6. PROFESSIONAL PROMPT (2+ LINES, AFO MAINS LEVEL)
+# 6. PROFESSIONAL PROMPT (AFO MAINS LEVEL)
 # ==========================================
 def build_prompt(text_chunk):
     truncated = text_chunk[:6000]
@@ -210,62 +209,67 @@ JSON template:
 ]"""
 
 # ==========================================
-# 7. GENERATE QUESTIONS (OPENROUTER + GEMINI FALLBACK)
+# 7. GENERATE QUESTIONS (OPENROUTER + GEMINI)
 # ==========================================
 def generate_questions(text_chunk):
     prompt = build_prompt(text_chunk)
     total_attempts = 0
-    max_attempts = (len(OPENROUTER_KEYS) * len(OPENROUTER_MODELS) +
-                    len(GEMINI_KEYS) * len(GEMINI_MODELS))
+    max_attempts = (len(OPENROUTER_KEYS) + len(GEMINI_KEYS) * len(GEMINI_MODELS))
 
-    # Layer 1: OpenRouter
+    # LAYER 1: OPENROUTER (auto free model)
     if OPENROUTER_KEYS:
-        print(f"🌐 Trying OpenRouter layer ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS)} attempts)")
+        print(f"🌐 OpenRouter layer: {len(OPENROUTER_KEYS)} keys with auto model (temp={OPENROUTER_TEMPERATURE})")
         for key_idx, api_key in enumerate(OPENROUTER_KEYS):
-            for model in OPENROUTER_MODELS:
-                total_attempts += 1
-                print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}, model {model}")
-                try:
-                    response_text = call_openrouter(model, api_key, prompt)
-                    # Clean response
-                    clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
-                    # Try to extract JSON if there's extra text
-                    json_match = re.search(r'\[[\s\S]*\]', clean)
-                    if json_match:
-                        clean = json_match.group(0)
-                    questions = json.loads(clean)
-                    if not isinstance(questions, list):
-                        questions = [questions]
-                    if len(questions) < 15:
-                        print(f"⚠️ Only {len(questions)} questions, retrying same model...")
-                        time.sleep(60)
-                        continue
-                    print(f"✅ Generated {len(questions)} questions using OpenRouter/{model}")
-                    return questions[:20]
-                except Exception as e:
-                    err = str(e)
-                    print(f"⚠️ OpenRouter {model} failed: {err[:150]}")
-                    if "INSUFFICIENT_CREDITS" in err or "402" in err:
-                        print("⏳ Insufficient credits for this model. Moving to next model/key.")
-                        time.sleep(10)
-                        continue
-                    if "JSON" in err or "Expecting value" in err:
-                        print("⏳ JSON parse error. Moving to next model/key.")
-                        time.sleep(10)
-                        continue
-                    print("⏳ Waiting 60 seconds before next attempt...")
+            total_attempts += 1
+            print(f"🌐 Attempt {total_attempts}/{max_attempts}: OpenRouter key {key_idx}")
+            try:
+                response_text = call_openrouter(api_key, prompt)
+                # Clean response
+                clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
+                json_match = re.search(r'\[[\s\S]*\]', clean)
+                if json_match:
+                    clean = json_match.group(0)
+                questions = json.loads(clean)
+                if not isinstance(questions, list):
+                    questions = [questions]
+                if len(questions) < 15:
+                    print(f"⚠️ Only {len(questions)} questions, retrying same key...")
                     time.sleep(60)
                     continue
+                print(f"✅ Generated {len(questions)} questions using OpenRouter (auto model)")
+                return questions[:20]
+            except Exception as e:
+                err = str(e)
+                print(f"⚠️ OpenRouter key {key_idx} failed: {err[:150]}")
+                if "INSUFFICIENT_CREDITS" in err or "402" in err:
+                    print("⏳ Insufficient credits – moving to next key (short wait)")
+                    time.sleep(5)
+                    continue
+                if "JSON" in err or "Expecting value" in err:
+                    print("⏳ JSON parse error – moving to next key")
+                    time.sleep(5)
+                    continue
+                print("⏳ Waiting 60 seconds before next key...")
+                time.sleep(60)
+                continue
 
-    # Layer 2: Gemini
-    print(f"🤖 OpenRouter layer exhausted. Switching to Gemini layer ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts)")
+    # LAYER 2: GEMINI (3 models)
+    print(f"🤖 Gemini layer: {len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts (temp={GEMINI_TEMPERATURE})")
     for key_idx, api_key in enumerate(GEMINI_KEYS):
         for model in GEMINI_MODELS:
             total_attempts += 1
             print(f"🤖 Attempt {total_attempts}/{max_attempts}: Gemini key {key_idx}, model {model}")
             try:
                 gemini_client = genai.Client(api_key=api_key)
-                response = gemini_client.models.generate_content(model=model, contents=prompt)
+                # Note: Gemini API uses generation_config for temperature
+                response = gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config={
+                        "temperature": GEMINI_TEMPERATURE,
+                        "max_output_tokens": 2000
+                    }
+                )
                 raw = response.text
                 clean = re.sub(r'```json\n|\n```|```', '', raw).strip()
                 json_match = re.search(r'\[[\s\S]*\]', clean)
@@ -284,14 +288,18 @@ def generate_questions(text_chunk):
                 err = str(e)
                 print(f"⚠️ Gemini {model} failed: {err[:150]}")
                 if "429" in err or "503" in err:
-                    print("⏳ Quota/overload. Waiting 60 seconds...")
+                    print("⏳ Quota/overload – waiting 60 seconds")
                     time.sleep(60)
                     continue
-                print("⏳ Waiting 10 seconds...")
+                if "404" in err:
+                    print("⏳ Model not found – moving to next model")
+                    time.sleep(5)
+                    continue
+                print("⏳ Waiting 10 seconds")
                 time.sleep(10)
                 continue
 
-    # All attempts exhausted
+    # ALL ATTEMPTS EXHAUSTED
     print(f"🚨 All {max_attempts} attempts exhausted. Waiting 1 hour...")
     time.sleep(3600)
     try:
@@ -310,7 +318,7 @@ def main():
     keep_alive()
     print("🚀 Agri-Bot System Initiated.")
     
-    # Reset only once – using MongoDB flag (persists across deploys)
+    # Reset only once using MongoDB flag
     if not is_reset_done():
         reset_and_start_fresh()
     else:
@@ -330,11 +338,11 @@ def main():
         print(f"✅ PDF exists: {pdf}")
     
     print("\n" + "="*60)
-    print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
-    print(f"🌐 Layer 1: OpenRouter ({len(OPENROUTER_KEYS)} keys × {len(OPENROUTER_MODELS)} models = {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS)} attempts)")
-    print(f"🤖 Layer 2: Gemini ({len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts)")
-    print(f"🔁 Total attempts: {len(OPENROUTER_KEYS)*len(OPENROUTER_MODELS) + len(GEMINI_KEYS)*len(GEMINI_MODELS)} per chunk")
-    print("⏱️ Each attempt gap: 60s (or less for non-quota errors)")
+    print("📖 PROCESSING (3 pages/chunk, 15–20 professional questions)")
+    print(f"🌐 OpenRouter: {len(OPENROUTER_KEYS)} keys with auto model (temp={OPENROUTER_TEMPERATURE})")
+    print(f"🤖 Gemini: {len(GEMINI_KEYS)} keys × {len(GEMINI_MODELS)} models = {len(GEMINI_KEYS)*len(GEMINI_MODELS)} attempts (temp={GEMINI_TEMPERATURE})")
+    print(f"🔁 Total attempts per chunk: {len(OPENROUTER_KEYS) + len(GEMINI_KEYS)*len(GEMINI_MODELS)}")
+    print("⏱️ Gaps: 5s for credits/parse/404 errors, 60s for quota/other errors")
     print("🚨 After all fails: wait 1h, then if still 429 wait until 5:30 AM IST")
     print("="*60 + "\n")
     
