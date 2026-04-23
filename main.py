@@ -11,54 +11,40 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
 from google import genai
+from google.genai import types  # for vision OCR
 import pypdf
 import gdown
 
-# ==========================================
-# 0. TRY TO IMPORT PYMUPDF (for image conversion & OCR)
-# ==========================================
+# Try to import pymupdf for PDF image conversion (needed for OCR)
 try:
     import pymupdf
     PYMU = True
 except ImportError:
     PYMU = False
-    print("⚠️ pymupdf not installed. OCR fallback will not work. Install with: pip install pymupdf")
+    print("⚠️ pymupdf not installed. OCR will not work. Install with: pip install pymupdf")
 
 sys.stdout.reconfigure(line_buffering=True)
 
 # ==========================================
-# 1. MASTER CONTROL – NO AUTOMATIC WIPE AFTER FIRST RUN
+# 1. MASTER CONTROL (only first run)
 # ==========================================
-TOTAL_WIPE_OUT = True   # Ignored after first run due to MongoDB flag
+TOTAL_WIPE_OUT = True   # Ignored after first run (MongoDB flag)
 
 # ==========================================
-# 2. PAGE-BASED SECTION MAPPING (your ranges)
+# 2. SECTION MAPPING (your page ranges)
 # ==========================================
 SECTION_RANGES = [
-    (1, 75, "Agronomy"),
-    (76, 242, "Horticulture"),
-    (243, 308, "Entomology"),
-    (309, 389, "Fisheries"),
-    (390, 517, "Animal Husbandry"),
-    (518, 557, "Plant Pathology"),
-    (558, 585, "Agricultural Economics"),
-    (586, 704, "General Agriculture"),
-    (705, 727, "Seed Technology"),
-    (728, 759, "Weed Science"),
-    (760, 771, "Apiculture"),
-    (772, 803, "Forestry"),
-    (804, 839, "Meteorology"),
-    (840, 860, "Genetics and Breeding"),
-    (861, 931, "Agricultural Engineering"),
-    (932, 941, "Extension Education"),
-    (942, 946, "Mushroom Cultivation"),
-    (947, 964, "Sericulture"),
-    (965, 966, "Lac Culture"),
+    (1, 75, "Agronomy"), (76, 242, "Horticulture"), (243, 308, "Entomology"),
+    (309, 389, "Fisheries"), (390, 517, "Animal Husbandry"), (518, 557, "Plant Pathology"),
+    (558, 585, "Agricultural Economics"), (586, 704, "General Agriculture"),
+    (705, 727, "Seed Technology"), (728, 759, "Weed Science"), (760, 771, "Apiculture"),
+    (772, 803, "Forestry"), (804, 839, "Meteorology"), (840, 860, "Genetics and Breeding"),
+    (861, 931, "Agricultural Engineering"), (932, 941, "Extension Education"),
+    (942, 946, "Mushroom Cultivation"), (947, 964, "Sericulture"), (965, 966, "Lac Culture"),
     (967, 1075, "Soil Science")
 ]
 
 def get_section_by_page(page_num):
-    """page_num is 0‑indexed internal page number -> returns section name"""
     actual_page = page_num + 1
     for start, end, name in SECTION_RANGES:
         if start <= actual_page <= end:
@@ -66,7 +52,7 @@ def get_section_by_page(page_num):
     return "General Agriculture"
 
 # ==========================================
-# 3. CONFIGURATION & ENVIRONMENT
+# 3. ENVIRONMENT & CONNECTIONS
 # ==========================================
 OPENROUTER_KEYS = os.getenv("OPENROUTER_KEYS", "").split(",")
 GEMINI_KEYS = os.getenv("GEMINI_KEYS", "").split(",")
@@ -78,11 +64,7 @@ SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 OPENROUTER_MODEL = "openrouter/free"
 OPENROUTER_TEMPERATURE = 0.4
 
-GEMINI_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro"
-]
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
 GEMINI_TEMPERATURE = 0.4
 
 if not GEMINI_KEYS or GEMINI_KEYS == ['']:
@@ -111,7 +93,7 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 4. TRACKER FUNCTIONS (PAGE ONLY)
+# 4. TRACKER & RESET (persistent)
 # ==========================================
 def get_current_page():
     try:
@@ -124,9 +106,6 @@ def update_current_page(page_num):
     progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
     print(f"📌 Page tracker updated to {page_num} (page {page_num+1} in 1‑index)")
 
-# ==========================================
-# 5. PERSISTENT MASTER RESET FLAG (ONCE)
-# ==========================================
 def is_master_reset_done():
     doc = config_collection.find_one({"_id": "master_reset_flag"})
     return doc.get("done", False) if doc else False
@@ -145,9 +124,6 @@ def perform_total_wipeout():
     mark_master_reset_done()
     print("✅ सब कुछ क्लीन हो गया। अब Page 1 से शुरू होगा।")
 
-# ==========================================
-# 6. WAIT UNTIL 5:30 AM IST (QUOTA RESET)
-# ==========================================
 def wait_until_5_30_am_ist():
     now_utc = datetime.utcnow()
     now_ist = now_utc + timedelta(hours=5, minutes=30)
@@ -159,10 +135,9 @@ def wait_until_5_30_am_ist():
     time.sleep(wait_seconds)
 
 # ==========================================
-# 7. PDF TEXT EXTRACTION WITH OCR FALLBACK (FULLPROOF)
+# 5. PDF TEXT EXTRACTION WITH CORRECT OCR
 # ==========================================
 def extract_text_from_pdf_page(page_num, pdf_path, gemini_client):
-    """Extract text from a single PDF page using pypdf -> pymupdf -> Gemini Vision OCR."""
     # Try pypdf
     try:
         reader = pypdf.PdfReader(pdf_path)
@@ -172,7 +147,8 @@ def extract_text_from_pdf_page(page_num, pdf_path, gemini_client):
                 return text.strip()
     except:
         pass
-    # Try pymupdf (fitz)
+
+    # Try pymupdf (normal text)
     if PYMU:
         try:
             doc = pymupdf.open(pdf_path)
@@ -181,12 +157,11 @@ def extract_text_from_pdf_page(page_num, pdf_path, gemini_client):
                 doc.close()
                 if text and text.strip():
                     return text.strip()
-            else:
-                if 'doc' in locals():
-                    doc.close()
+            doc.close()
         except:
             pass
-    # Fallback: Use Gemini Vision OCR (convert page to image)
+
+    # OCR via Gemini Vision
     if PYMU and gemini_client:
         try:
             doc = pymupdf.open(pdf_path)
@@ -194,12 +169,11 @@ def extract_text_from_pdf_page(page_num, pdf_path, gemini_client):
                 pix = doc[page_num].get_pixmap()
                 img_bytes = pix.tobytes("png")
                 doc.close()
-                b64 = base64.b64encode(img_bytes).decode('utf-8')
                 response = gemini_client.models.generate_content(
                     model="gemini-2.0-flash",
                     contents=[
                         "Extract all readable text from this image of an agricultural book page. Return only the extracted text, no extra comments.",
-                        {"mime_type": "image/png", "data": b64}
+                        types.Part.from_bytes(data=img_bytes, mime_type="image/png")
                     ]
                 )
                 text = response.text.strip()
@@ -215,16 +189,8 @@ def extract_text_from_pdf_page(page_num, pdf_path, gemini_client):
     return ""
 
 def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
-    """Extract text from a range of pages (max 3 pages). Returns None if end of PDF."""
     if not os.path.exists(pdf_path):
         return ""
-    # Get Gemini client for OCR (use first key)
-    gemini_client = None
-    try:
-        gemini_client = genai.Client(api_key=GEMINI_KEYS[0])
-    except:
-        pass
-    # Get total pages
     try:
         reader = pypdf.PdfReader(pdf_path)
         total_pages = len(reader.pages)
@@ -234,6 +200,11 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
         return None
     actual_end = min(end_page, total_pages)
     print(f"📖 Extracting pages {start_page+1} to {actual_end}")
+    gemini_client = None
+    try:
+        gemini_client = genai.Client(api_key=GEMINI_KEYS[0])
+    except:
+        pass
     all_text = []
     for p in range(start_page, actual_end):
         text = extract_text_from_pdf_page(p, pdf_path, gemini_client)
@@ -241,20 +212,124 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
             all_text.append(text)
         else:
             print(f"⚠️ No text extracted from page {p+1} even after OCR")
+        # free per-page memory
+        del text
+        gc.collect()
     combined = "\n".join(all_text).strip()
     if not combined:
         print(f"❌ No text at all for pages {start_page+1}-{actual_end}")
     return combined if combined else ""
 
 # ==========================================
-# 8. OPENROUTER API CALL
+# 6. FULL PROMPT WITH YOUR DEMO QUESTIONS (48 examples)
+# ==========================================
+def build_prompt(text_chunk, section_name):
+    truncated = text_chunk[:6000]
+    full_prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
+Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
+
+CRITICAL RULES:
+1. Level: MODERATE (conceptual and professional).
+2. Questions MUST be 2 to 3 lines long (exactly like the examples below). DO NOT use phrases like "According to the text".
+3. Return ONLY a valid JSON list. No code blocks, no markdown, no text explanations.
+4. Provide exactly 5 options as fields named opt1, opt2, opt3, opt4, opt5. Do NOT use an "options" array. The correct answer must be placed in the "answer" field as the exact text of the correct option.
+5. The "section" field must be set to the value we provide: "{section_name}". Use this exact section name for all questions in this chunk.
+6. Each object must have: section, question, opt1, opt2, opt3, opt4, opt5, answer.
+
+STYLE EXAMPLES – YOUR BRAIN MUST MATCH THIS EXACT TONE, LENGTH, AND FORMAT:
+
+Original examples (21 questions):
+- "Which soil science branch specifically focuses on the origin, morphological characteristics, classification processes, and geographical distribution of soils?"
+- "Dolly the sheep became the first mammal cloned successfully. Which advanced biotechnological technique was utilized to produce this clone?"
+- "The deficiency of which essential micronutrient leads to the manifestation of Khaira disease in rice, characterized by chlorotic leaves and stunted growth?"
+- "The traditional shifting cultivation system known as Jhum is also referred to as 'Bewar' and 'Dahiya.' In which Indian state are these local names used?"
+- "In papaya cultivation, a proportion of male plants must be retained to ensure adequate pollination for fruit development. What is the recommended percentage of male plants?"
+- "Among domestic animals, cow milk is known to be comparatively low in which essential mineral, making supplementation important for infants and certain populations?"
+- "LD50 is a standard toxicological parameter used to express the potency of pesticides. What does LD50 specifically measure?"
+- "Olsen's extractant method is widely used to determine the availability of which nutrient in neutral to alkaline soils?"
+- "Anthrax, a highly contagious disease affecting livestock, can also be transmitted to humans. By what alternate name is this zoonotic disease known?"
+- "Blanching of vegetables prior to freezing is carried out primarily to achieve which purpose?"
+- "Which organization in India specifically focuses on strengthening and promoting small-scale shrimp farming through technical support and cooperative development?"
+- "Which Indian buffalo breed is regarded as the best globally due to milk production and is extensively used for grading up various local buffalo populations?"
+- "The certification required to declare plants or planting material as disease-free for international export is known as which certificate?"
+- "Which prestigious North Indian mango cultivar is famous for its sweet flavour, pleasant aroma, fiberless pulp, thin stone, and excellent transport quality?"
+- "What is the primary advantage of vegetative (clonal) propagation of plants compared to seed propagation?"
+- "Which of the following statements is NOT correct regarding forest soils?"
+- "In diffusion of innovations, what term is used for the group of individuals who are traditional and the last to adopt new technology and often show resistance until the idea is fully established?"
+- "A mating or crossing between two individuals differing in only one pair of contrasting alleles results in which type of genetic cross?"
+- "The stable, dark, amorphous, colloidal product of organic matter decomposition that is resistant to microbial breakdown is known as what?"
+- "The conversion of nitrite or nitrate into gaseous nitrogen during the nitrogen cycle is known as what process?"
+- "The certification tag colour associated with Foundation Seed under seed certification standards is which of the following?"
+
+Additional examples (Rice, Soil, Genetics) – these use opt1..opt5 format:
+- Example: "Rice, a major cereal crop ranking first in area and production in India, belongs to which botanical species with a diploid chromosome number of 24?"
+  Opt1: "Oryza japonica", Opt2: "Oryza sativa", Opt3: "Oryza javanica", Opt4: "Oryza indica", Opt5: "Oryza glaberrima", Answer: "Oryza sativa"
+- Example: "According to Vavilov, the cultivated rice species Oryza sativa is believed to have originated from which geographical region?"
+  Opt1: "South America", Opt2: "Africa", Opt3: "Europe", Opt4: "Australia", Opt5: "South east Asia (Indo-Burma)", Answer: "South east Asia (Indo-Burma)"
+- Example: "What is the diploid chromosome number of the common cultivated rice, Oryza sativa?"
+  Opt1: "2n=12", Opt2: "2n=24", Opt3: "2n=36", Opt4: "2n=48", Opt5: "2n=20", Answer: "2n=24"
+- Example: "The inflorescence of rice, consisting of a group of spikelets, is classified as what type?"
+  Opt1: "Spike", Opt2: "Panicle", Opt3: "Raceme", Opt4: "Umbel", Opt5: "Corymb", Answer: "Panicle"
+- Example: "Rice grain is technically a caryopsis. What is the characteristic fruit type of rice?"
+  Opt1: "Drupe", Opt2: "Berry", Opt3: "Caryopsis", Opt4: "Achene", Opt5: "Nut", Answer: "Caryopsis"
+- Example: "Which gene is responsible for the dwarfing characteristic in rice varieties, often associated with high-yielding strains?"
+  Opt1: "Green revolution gene", Opt2: "Dwarf-1", Opt3: "Dee-gee-woo", Opt4: "Short-stature gene", Opt5: "Nano gene", Answer: "Dee-gee-woo"
+- Example: "Oryza sativa has three main varietal types. Which type is known as temperate rice, responsive to intensive inputs, and has the highest productivity?"
+  Opt1: "Indica", Opt2: "Japonica", Opt3: "Javanica", Opt4: "Tropical rice", Opt5: "Wild rice", Answer: "Japonica"
+- Example: "Among the varietal types of rice, which one has the highest productivity, followed by Javanica and Indica?"
+  Opt1: "Indica", Opt2: "Japonica", Opt3: "Javanica", Opt4: "Hybrid rice", Opt5: "Aromatic rice", Answer: "Japonica"
+- Example: "The rice grain or caryopsis is tightly enclosed by lema and palea. What is this collective structure known as?"
+  Opt1: "Husk", Opt2: "Hull", Opt3: "Chaff", Opt4: "Glume", Opt5: "Lemma", Answer: "Hull"
+- Example: "Approximately what percentage of the world's rice production comes from Asia alone?"
+  Opt1: "70%", Opt2: "80%", Opt3: "90%", Opt4: "95%", Opt5: "85%", Answer: "90%"
+- Example: "Rice fields account for what percentage of the total arable land globally?"
+  Opt1: "5%", Opt2: "11%", Opt3: "15%", Opt4: "20%", Opt5: "25%", Answer: "11%"
+- Example: "In rice, the stem is specifically referred to by what term, made up of nodes and internodes?"
+  Opt1: "Stalk", Opt2: "Culm or haulm", Opt3: "Trunk", Opt4: "Shoot", Opt5: "Axis", Answer: "Culm or haulm"
+- Example: "What is the import policy for rice seeds in India, as mentioned in the context of rice cultivation?"
+  Opt1: "Permitted freely", Opt2: "Restricted", Opt3: "Banned", Opt4: "Allowed with quota", Opt5: "Only for research", Answer: "Restricted"
+- Example: "Rice is classified as what type of plant based on its photoperiod sensitivity, requiring short days for optimal growth?"
+  Opt1: "Long day plant", Opt2: "Short day plant", Opt3: "Day neutral plant", Opt4: "Intermediate day plant", Opt5: "Photoperiod insensitive", Answer: "Short day plant"
+- Example: "What is the optimal temperature range for blooming in rice crops, as specified for proper flowering?"
+  Opt1: "20-25°C", Opt2: "26.5-29.5°C", Opt3: "21-37°C", Opt4: "15-20°C", Opt5: "30-35°C", Answer: "26.5-29.5°C"
+- Example: "What is the preferred pH range for rice cultivation, ensuring optimal growth in soil conditions?"
+  Opt1: "4-6", Opt2: "5.5-6.5", Opt3: "6-7", Opt4: "7-8", Opt5: "5-7", Answer: "5.5-6.5"
+- Example: "Which soil texture is most suited for rice cultivation, providing good water retention and structure?"
+  Opt1: "Sandy loam", Opt2: "Clay or clay loam", Opt3: "Silt loam", Opt4: "Peaty soil", Opt5: "Lateritic soil", Answer: "Clay or clay loam"
+- Example: "Under continuous flooding in a rice-rice-rice cropping sequence, soil loses mechanical strength leading to fluffiness. What is this condition specifically called?"
+  Opt1: "Waterlogging", Opt2: "Salinization", Opt3: "Fluffy Paddy Soil", Opt4: "Compaction", Opt5: "Erosion", Answer: "Fluffy Paddy Soil"
+- Example: "Rice exhibits which type of germination where the cotyledons remain below the soil surface?"
+  Opt1: "Epigeal", Opt2: "Hypogeal", Opt3: "Viviparous", Opt4: "Cryptocotylar", Opt5: "Phanerocotylar", Answer: "Hypogeal"
+- Example: "In submerged rice cultivation, how is atmospheric oxygen transported to the roots to support growth?"
+  Opt1: "Through stomata", Opt2: "Via aerenchymatous tissues", Opt3: "By diffusion from water", Opt4: "Through root hairs", Opt5: "By symbiotic bacteria", Answer: "Via aerenchymatous tissues"
+- Example: "In rice cultivation using the SRI method, what is the recommended age of seedlings for transplanting to ensure optimal growth?"
+  Opt1: "10-12 days old", Opt2: "14-15 days old", Opt3: "21-25 days old", Opt4: "30-35 days old", Opt5: "40-45 days old", Answer: "14-15 days old"
+- Example: "What is the recommended percentage of nitrogen requirement that can be reduced in rice cultivation through the use of Biological Nitrogen Fixation?"
+  Opt1: "10-15%", Opt2: "20-25%", Opt3: "25-30%", Opt4: "30-35%", Opt5: "40-50%", Answer: "25-30%"
+- Example: "In puddled lowland rice fields, which soil zone is characterized by the presence of oxygen and is located just below the water surface?"
+  Opt1: "Reduced zone", Opt2: "Oxidized zone", Opt3: "Aerobic zone", Opt4: "Anaerobic zone", Opt5: "Subsurface zone", Answer: "Oxidized zone"
+- Example: "Which form of nitrogenous fertilizer is recommended for deep placement in the reduced zone of lowland rice fields to improve nitrogen use efficiency?"
+  Opt1: "Nitrate fertilizers", Opt2: "Urea", Opt3: "Ammonium sulphate", Opt4: "Calcium ammonium nitrate", Opt5: "Ammonium phosphate", Answer: "Ammonium sulphate"
+- Example: "Golden rice is a genetically modified variety developed to address vitamin A deficiency. Which gene is incorporated into Golden rice to produce beta-carotene?"
+  Opt1: "Lysine gene", Opt2: "Oryzenin gene", Opt3: "Beta-carotene gene", Opt4: "Silica gene", Opt5: "Nitrogen fixation gene", Answer: "Beta-carotene gene"
+- Example: "What is the hulling percentage in rice, which refers to the yield of milled rice from paddy?"
+  Opt1: "50%", Opt2: "60%", Opt3: "66%", Opt4: "70%", Opt5: "75%", Answer: "66%"
+- Example: "During the reproductive and grain formation stage in rice, what is the beneficial depth of water submergence in the field?"
+  Opt1: "2.5 cm", Opt2: "5 cm", Opt3: "10 cm", Opt4: "15 cm", Opt5: "20 cm", Answer: "5 cm"
+
+Now, generate between 15 and 20 questions from the text below. Follow the exact format: each question as a JSON object with section (set to "{section_name}"), question, opt1, opt2, opt3, opt4, opt5, answer.
+
+Text Source:
+{truncated}
+"""
+    return full_prompt
+
+# ==========================================
+# 7. OPENROUTER & GEMINI QUESTION GENERATION
 # ==========================================
 def call_openrouter(api_key, prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -269,32 +344,6 @@ def call_openrouter(api_key, prompt):
     else:
         raise Exception(f"OpenRouter error {response.status_code}: {response.text[:200]}")
 
-# ==========================================
-# 9. FULL PROMPT (48 EXAMPLES) – condensed for brevity; include full in final
-# ==========================================
-def build_prompt(text_chunk, section_name):
-    truncated = text_chunk[:6000]
-    prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
-Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
-
-CRITICAL RULES:
-1. Level: MODERATE (conceptual and professional).
-2. Questions MUST be 2 to 3 lines long (exactly like the examples below). DO NOT use phrases like "According to the text".
-3. Return ONLY a valid JSON list. No code blocks, no markdown, no text explanations.
-4. Provide exactly 5 options as fields named opt1, opt2, opt3, opt4, opt5. Do NOT use an "options" array. The correct answer must be placed in the "answer" field as the exact text of the correct option.
-5. The "section" field must be set to the value we provide: "{section_name}". Use this exact section name for all questions in this chunk.
-6. Each object must have: section, question, opt1, opt2, opt3, opt4, opt5, answer.
-
-[FULL LIST OF 48 EXAMPLES – include all from previous code for style matching]
-
-Text Source:
-{truncated}
-"""
-    return prompt
-
-# ==========================================
-# 10. ROBUST QUESTION PARSER
-# ==========================================
 def parse_questions(response_text, default_section):
     clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
     json_match = re.search(r'\[[\s\S]*\]', clean)
@@ -332,9 +381,6 @@ def parse_questions(response_text, default_section):
         raise ValueError(f"Only {len(valid)} valid questions (need 15)")
     return valid[:20]
 
-# ==========================================
-# 11. GENERATE QUESTIONS (OpenRouter + Gemini)
-# ==========================================
 def generate_questions(text_chunk, section_name):
     prompt = build_prompt(text_chunk, section_name)
     max_attempts = len(OPENROUTER_KEYS) + len(GEMINI_KEYS) * len(GEMINI_MODELS)
@@ -356,10 +402,7 @@ def generate_questions(text_chunk, section_name):
                     print(f"⚠️ OpenRouter key {key_idx} failed: {err[:150]}")
                     if "INSUFFICIENT_CREDITS" in err or "402" in err:
                         break
-                    if "No JSON array" in err or "JSON decode error" in err:
-                        time.sleep(5)
-                        continue
-                    time.sleep(10)
+                    time.sleep(5)
             time.sleep(2)
 
     # Gemini
@@ -386,25 +429,24 @@ def generate_questions(text_chunk, section_name):
                     time.sleep(5)
                 continue
 
-    print(f"🚨 All {max_attempts} attempts exhausted. Waiting 1 hour...")
+    print(f"🚨 All attempts exhausted. Waiting 1 hour...")
     time.sleep(3600)
     return generate_questions(text_chunk, section_name)
 
 # ==========================================
-# 12. MAIN LOOP – RESUME, NO SKIP, OCR FALLBACK
+# 8. MAIN LOOP – Resume, Memory Clean, No Infinite Loop
 # ==========================================
 def main():
     from keep_alive import keep_alive
     keep_alive()
     print("🚀 Agri-Bot System Initiated.")
     
-    # Master reset only once (persistent flag)
     if not is_master_reset_done():
         perform_total_wipeout()
-        print("⚠️ First run complete. Sheet will NEVER be cleared again.")
+        print("⚠️ Master reset done. Sheet will NEVER be cleared again.")
     else:
         current = get_current_page()
-        print(f"✅ Resume Mode: Page {current+1} (0‑index {current}) – Sheet data preserved, no reset.")
+        print(f"✅ Resume Mode: Page {current+1} (0‑index {current}) – continuing from saved page.")
     
     pdf = "book.pdf"
     if not os.path.exists(pdf):
@@ -421,8 +463,9 @@ def main():
     print("\n" + "="*60)
     print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
     print("🗂️ Section mapping based on page ranges.")
-    print("🚫 OCR fallback enabled – scanned pages will be converted to text.")
-    print("🔄 Master reset flag stored – sheet NEVER cleared again.")
+    print("🔍 OCR via Gemini Vision enabled (correct API format).")
+    print("🔄 Page tracker advances even if OCR fails (no infinite loop).")
+    print("🧹 Memory cleanup after each page.")
     print("="*60 + "\n")
     
     total_q = 0
@@ -439,14 +482,15 @@ def main():
             if text is None:
                 print("🏁 End of PDF reached.")
                 break
+            
             if len(text.strip()) < 150:
-                print(f"⚠️ Very little text ({len(text)} chars). Skipping chunk (after OCR).")
+                print(f"⚠️ Insufficient text ({len(text)} chars). Skipping chunk.")
                 update_current_page(next_page)
                 gc.collect()
                 time.sleep(10)
                 continue
             
-            print(f"🧠 Generating 15–20 questions ({len(text)} chars) for section: {section}")
+            print(f"🧠 Generating 15–20 questions ({len(text)} chars) for {section}")
             questions = generate_questions(text, section)
             if not questions:
                 print("⚠️ No questions generated. Skipping chunk.")
@@ -468,7 +512,7 @@ def main():
             print(f"✅ Appended {len(questions)} questions to {section} (total {total_q})")
             update_current_page(next_page)
             errors = 0
-            # Free memory
+            # free memory
             del text, questions, rows
             gc.collect()
             print("⏳ Success gap: 30 seconds")
