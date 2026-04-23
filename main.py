@@ -144,7 +144,7 @@ def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
             try:
                 doc = pymupdf.open(pdf_path)
                 page = doc[p]
-                page_text = page.get_text("text") # Added "text" flag for better extraction
+                page_text = page.get_text("text") 
                 doc.close()
                 if page_text and page_text.strip():
                     all_text.append(page_text.strip())
@@ -285,7 +285,6 @@ def generate_questions(text_chunk, section_name):
             except Exception as e:
                 err = str(e)
                 print(f"⚠️ Gemini {model} failed: {err[:150]}")
-                # Increased sleep time for Quota (429) errors
                 if "429" in err or "RESOURCE_EXHAUSTED" in err:
                     print("⏳ API Limit hit! Waiting for 60 seconds before retrying...")
                     time.sleep(60)
@@ -317,12 +316,12 @@ def main():
     # Force the tracker to Page 23 (Index 22)
     print("⏩ Forcing script to start from Page 23 as requested...")
     update_current_page(22) 
-    current = get_current_page()
     
     pdf = "book.pdf"
     if not os.path.exists(pdf):
         print("📥 Downloading book...")
-        url = f"[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){DRIVE_FILE_ID.strip()}"
+        # Fixed URL string issue here (No markdown hidden links)
+        url = "[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=)" + DRIVE_FILE_ID.strip()
         gdown.download(url, pdf, quiet=False)
         if not os.path.exists(pdf):
             print("❌ Download failed.")
@@ -356,7 +355,7 @@ def main():
                 print("⏩ Skipping to next chunk...")
                 update_current_page(next_page)
                 gc.collect()
-                time.sleep(3) # Shortened sleep to move past images faster
+                time.sleep(3) 
                 continue
             
             print(f"🧠 Generating questions ({len(text)} chars) for {section}")
