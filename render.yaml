@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: afo-exam-paper   # <--- यहाँ नाम अपडेट कर दिया गया है
+    env: docker
+    region: singapore      # आप इसे अपने अनुसार बदल सकते हैं
+    plan: free 
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: PYTHONUNBUFFERED
+        value: "1"
