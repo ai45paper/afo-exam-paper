@@ -233,7 +233,7 @@ def generate_questions(text, section):
     return None
 
 # ==========================================
-# 6. MASTER WORKFLOW
+# 6. MASTER WORKFLOW (RAM OPTIMIZED)
 # ==========================================
 def main_workflow():
     pdf_path = "book.pdf"
@@ -242,7 +242,6 @@ def main_workflow():
         gdown.download(f"https://drive.google.com/uc?id={DRIVE_FILE_ID}", pdf_path, quiet=False)
 
     print("\n🚀 Starting PDF Processing Engine...")
-    reader = pypdf.PdfReader(pdf_path)
     
     while True:
         try:
@@ -252,21 +251,30 @@ def main_workflow():
             
             print(f"\n📖 Scanning Pages: {curr_page+1} to {next_page} | Topic: {section}")
             
-            if curr_page >= len(reader.pages):
+            # RAM FIX: Open reader locally inside the loop, and close it immediately.
+            reader = pypdf.PdfReader(pdf_path)
+            total_pages = len(reader.pages)
+            
+            if curr_page >= total_pages:
                 print("🏁 Book completely processed!")
                 break
                 
             text = ""
-            for i in range(curr_page, min(next_page, len(reader.pages))):
+            for i in range(curr_page, min(next_page, total_pages)):
                 extracted = extract_text_with_ocr(reader, pdf_path, i)
                 if extracted:
                     text += extracted + "\n"
+            
+            # RAM FIX: Delete reader and free memory BEFORE calling AI
+            del reader
+            gc.collect() 
             
             if not text or len(text.strip()) < 50:
                 print("⚠️ Page is completely blank or unreadable. Skipping chunk.")
                 update_tracker(next_page)
                 continue
 
+            # Call AI Engine
             questions = generate_questions(text, section)
             
             if questions and isinstance(questions, list) and len(questions) > 0:
@@ -293,8 +301,7 @@ def main_workflow():
             time.sleep(60)
             
         finally:
-            gc.collect()
-
+            gc.collect() # Ultimate RAM cleanup
 # ==========================================
 # 7. FLASK SERVER (KEEP-ALIVE FOR RENDER)
 # ==========================================
