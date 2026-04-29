@@ -30,7 +30,6 @@ SHEET_ID = os.getenv("SHEET_ID", "").strip()
 DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "").strip()
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
 
-# Strict Section Mapping
 SECTION_RANGES = [
     (1, 75, "Agronomy"), (76, 242, "Horticulture"), (243, 308, "Entomology"),
     (309, 389, "Fisheries"), (390, 517, "Animal Husbandry"), (518, 557, "Plant Pathology"),
@@ -58,7 +57,7 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ==========================================
-# 3. TRACKER & ONE-TIME SHEET CLEAR LOGIC
+# 3. TRACKER & SHEET LOGIC
 # ==========================================
 def init_tracker_and_sheet():
     tracker = tracker_col.find_one({"_id": "pdf_tracker"})
@@ -71,7 +70,7 @@ def init_tracker_and_sheet():
         return 1
     else:
         p = tracker.get("current_page", 1)
-        print(f"✅ Restarting safely from Page {p+1} (Index {p}). Data is protected.")
+        print(f"✅ Restarting safely from Page {p+1} (Index {p}).")
         return p
 
 def update_tracker(page_num):
@@ -84,7 +83,7 @@ def get_section(p_idx):
     return "General Agriculture"
 
 # ==========================================
-# 3.5 OCR TEXT EXTRACTION (PRO OPTIMIZED)
+# 3.5 OCR TEXT EXTRACTION (FIXED POPPLER PATH)
 # ==========================================
 def extract_text_with_ocr(reader, pdf_path, page_index):
     text = reader.pages[page_index].extract_text()
@@ -94,16 +93,18 @@ def extract_text_with_ocr(reader, pdf_path, page_index):
 
     print(f"🔍 High-Res OCR activated for Page {page_index+1}")
     try:
+        # Added poppler_path="/usr/bin" for Docker Compatibility
         images = convert_from_path(
             pdf_path,
             first_page=page_index + 1,
             last_page=page_index + 1,
-            dpi=300
+            dpi=300,
+            poppler_path="/usr/bin" 
         )
         
         ocr_text = ""
         for img in images:
-            gray = img.convert("L")  # Convert to Grayscale for better contrast
+            gray = img.convert("L")
             ocr_text += pytesseract.image_to_string(
                 gray,
                 lang="eng",
@@ -115,7 +116,7 @@ def extract_text_with_ocr(reader, pdf_path, page_index):
         return ""
 
 # ==========================================
-# 4. THE AI BRAIN (PROMPT & PARSING)
+# 4. THE AI BRAIN
 # ==========================================
 def build_afo_prompt(text, section):
     return f"""
@@ -123,14 +124,10 @@ You are a Professional Agriculture Examiner and Senior Question Setter
 for competitive exams such as IBPS AFO Mains and UPSSSC AGTA.
 
 TASK
-You will receive TEXT extracted from TWO BOOK PAGES.
-Your job is to read the text carefully and generate high-quality 
-professional MCQ questions strictly from the provided content.
+Read the text carefully and generate high-quality professional MCQ questions.
 
 STRICT RULE
 • Use ONLY the information present in the provided text.
-• Do NOT add external knowledge.
-• Do NOT assume facts not written in the text.
 • Extract exam-oriented facts, concepts, numbers, varieties, diseases, etc.
 
 Topic / Section: {section}
@@ -144,13 +141,13 @@ QUESTION REQUIREMENTS
 3. Options: Each question MUST contain **exactly 5 distinct options**.
 4. Explanation: Provide a **1–2 line conceptual explanation** for the correct answer.
 
-QUESTION COUNT RULE (IMPORTANT)
+QUESTION COUNT RULE
 • Limited info → **5–8 questions**
 • Moderate info → **8–12 questions**
 • Rich technical data → **12–20 questions**
 
 OUTPUT FORMAT (CRITICAL)
-Return ONLY a valid **JSON array**. Do NOT include Markdown, Code blocks, or text outside JSON.
+Return ONLY a valid **JSON array**. No markdown outside JSON.
 
 JSON STRUCTURE
 [
@@ -229,7 +226,11 @@ def generate_questions(text, section):
             except Exception as e3:
                 print(f"❌ Critical: All AI Providers failed.")
                 return None
-    if raw_response: return extract_json_from_response(raw_response)
+                
+    if raw_response:
+        # Added debug print to confirm AI response
+        print("🧠 AI Response Received")
+        return extract_json_from_response(raw_response)
     return None
 
 # ==========================================
@@ -251,7 +252,6 @@ def main_workflow():
             
             print(f"\n📖 Scanning Pages: {curr_page+1} to {next_page} | Topic: {section}")
             
-            # RAM FIX: Open reader locally inside the loop, and close it immediately.
             reader = pypdf.PdfReader(pdf_path)
             total_pages = len(reader.pages)
             
@@ -265,7 +265,6 @@ def main_workflow():
                 if extracted:
                     text += extracted + "\n"
             
-            # RAM FIX: Delete reader and free memory BEFORE calling AI
             del reader
             gc.collect() 
             
@@ -274,7 +273,6 @@ def main_workflow():
                 update_tracker(next_page)
                 continue
 
-            # Call AI Engine
             questions = generate_questions(text, section)
             
             if questions and isinstance(questions, list) and len(questions) > 0:
@@ -301,9 +299,10 @@ def main_workflow():
             time.sleep(60)
             
         finally:
-            gc.collect() # Ultimate RAM cleanup
+            gc.collect()
+
 # ==========================================
-# 7. FLASK SERVER (KEEP-ALIVE FOR RENDER)
+# 7. FLASK SERVER (FIXED THREADING)
 # ==========================================
 app = Flask(__name__)
 
@@ -316,8 +315,11 @@ def run_server():
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    server_thread = Thread(target=run_server)
-    server_thread.daemon = True
-    server_thread.start()
+    print("🚀 Starting Agri AI Engine")
     
-    main_workflow()
+    # Workflow in background thread, Server on main thread (Fixes Render Port Issue)
+    workflow_thread = Thread(target=main_workflow)
+    workflow_thread.daemon = True
+    workflow_thread.start()
+    
+    run_server()
