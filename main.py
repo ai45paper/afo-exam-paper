@@ -8,7 +8,7 @@ import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
-import fitz  # PyMuPDF: Best for large 117MB PDFs
+import fitz  # PyMuPDF: Best for large PDFs
 import gdown
 from flask import Flask
 from threading import Thread
@@ -59,19 +59,19 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ==========================================
-# 3. TRACKER (FORCE RESET LOGIC)
+# 3. TRACKER & SHEET LOGIC (Headers Updated)
 # ==========================================
 def init_tracker_and_sheet():
-    # Note: Changed ID to "sheet_init_v2" to force a fresh wipe right now.
-    reset_flag = tracker_col.find_one({"_id": "sheet_init_v2"})
+    reset_flag = tracker_col.find_one({"_id": "sheet_init_v3"})
     
     if not reset_flag:
         print("🔁 CLEAN START: Wiping Google Sheet and resetting to Page 1...")
         sheet.clear()
-        headers = ["Section", "Question", "Option 1", "Option 2", "Option 3", "Option 4", "Option 5", "Answer", "Explanation"]
+        # Header updated as per rule 8
+        headers = ["Topic", "Question", "Option A", "Option B", "Option C", "Option D", "Option E", "Answer", "Explanation"]
         sheet.append_row(headers)
         
-        tracker_col.update_one({"_id": "sheet_init_v2"}, {"$set": {"done": True}}, upsert=True)
+        tracker_col.update_one({"_id": "sheet_init_v3"}, {"$set": {"done": True}}, upsert=True)
         tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": 0}}, upsert=True)
         return 0
     else:
@@ -112,36 +112,40 @@ def extract_text_with_ocr(doc, pdf_path, page_index):
         return ""
 
 # ==========================================
-# 5. PROFESSIONAL PROMPT (AGTA 2026 & AFO Moderate Level)
+# 5. PROFESSIONAL PROMPT (Pattern Training Updated)
 # ==========================================
 def build_afo_prompt(text, section):
     examples = """
-EXAMPLES OF GOOD QUESTIONS (IBPS AFO Mains Level):
+REFERENCE QUESTION STYLE (Follow exactly):
 
-Q: The excretory organ of silkworm which is located at the junction of the midgut and hindgut.
+The excretory organ of silkworm located at junction of midgut and hindgut is
 Options: Proboscis | Malpighian tubule | Nephridia | Green glands | None
 Answer: Malpighian tubule
 
-Q: Ufra disease in rice is caused by ___
+Ufra disease in rice is caused by
 Options: Bacteria | Nematode | Virus | Fungus | None
 Answer: Nematode
 
-Q: Sand percentage in sandy soil is
+Sand percentage in sandy soil is approximately
 Options: 40% | 60% | 80% | 20% | 45%
 Answer: 80%
 
-Q: The process of removing the green colouring (known as chlorophyll) from the skin of citrus fruit by introducing ethylene gas is known as
+Degreening in citrus fruits refers to
 Options: Ripening | Degreening | Physiological maturity | Denavelling | Dehusking
 Answer: Degreening
+
+Use same exam style questions.
+Avoid repeating same question pattern.
 """
 
     return f"""
 You are Satyam Sir, an expert agriculture mentor setting a mock paper for the AGTA 2026 and IBPS AFO Mains batches.
 
-Your task: Generate high-quality, MODERATE LEVEL multiple-choice questions from the given agricultural content. Do not make them overly hard, keep them engaging and highly relevant to competitive exams.
+Your task: Generate high-quality, MODERATE LEVEL multiple-choice questions from the given agricultural content.
+Language: Bilingual (Hindi as base, Technical terms in English).
 
 STRICT RULES:
-1. Moderate Difficulty: Focus on key terms, clear processes, and important data.
+1. Moderate Difficulty: Focus on key terms and clear processes.
 2. Structure: 20-35 words per question. Exactly 5 options per question.
 3. Formatting: Do NOT output prefixes like "Option A:" or "1)". Provide plain text.
 4. Output Limit: Maximum 10 questions per chunk.
@@ -155,7 +159,7 @@ You MUST return ONLY a RAW JSON ARRAY. No markdown block formatting (do not use 
 [
   {{
     "section": "{section}",
-    "question": "Question text here...",
+    "question": "Question text here (Bilingual)...",
     "opt1": "First option text",
     "opt2": "Second option text",
     "opt3": "Third option text",
@@ -171,23 +175,23 @@ Content:
 """
 
 # ==========================================
-# 6. JSON PARSER (FIXES SHEET FORMATTING CORRUPTION)
+# 6. JSON PARSER (Enforcing Max 10 MCQs)
 # ==========================================
 def extract_and_clean_json(raw_text):
     try:
-        # Extract json array even if AI adds extra text
         match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
         if match:
             data = json.loads(match.group(0))
         else:
             data = json.loads(raw_text)
             
+        data = data[:10]  # Enforce Max 10 Rule
+        
         cleaned_data = []
-        for item in data[:10]: # Enforce max 10
+        for item in data:
             cleaned_data.append({
                 "section": str(item.get("section", "")).strip(),
                 "question": str(item.get("question", "")).strip(),
-                # Removes any "Option1:", "A)", or "1." the AI might accidentally include
                 "opt1": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt1", "")), flags=re.IGNORECASE).strip(),
                 "opt2": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt2", "")), flags=re.IGNORECASE).strip(),
                 "opt3": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt3", "")), flags=re.IGNORECASE).strip(),
@@ -202,70 +206,120 @@ def extract_and_clean_json(raw_text):
         return None
 
 # ==========================================
-# 7. AI FALLBACK ENGINE
+# 7. AI FALLBACK ENGINE (Updated Models & Sleeps)
 # ==========================================
 def call_openrouter(prompt):
-    models = ["mistralai/mixtral-8x7b-instruct", "meta-llama/llama-3-70b-instruct"]
+    models = [
+        "openrouter/auto",
+        "mistralai/mixtral-8x7b-instruct",
+        "meta-llama/llama-3-70b-instruct"
+    ]
     url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
     for key in OPENROUTER_KEYS:
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         for model in models:
             try:
-                print(f"🔄 OpenRouter: {model}")
-                payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.4}
+                print(f"🔄 OpenRouter Model: {model}")
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,
+                    "max_tokens": 2500
+                }
                 r = requests.post(url, headers=headers, json=payload, timeout=60)
-                if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
-            except: continue
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"]
+                time.sleep(5)
+            except:
+                continue
     return None
 
 def call_nvidia(prompt):
     url = "[https://integrate.api.nvidia.com/v1/chat/completions](https://integrate.api.nvidia.com/v1/chat/completions)"
     headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
-    try:
-        print("🧠 NVIDIA: nemotron-70b")
-        payload = {"model": "nvidia/llama-3.1-nemotron-70b-instruct", "messages": [{"role": "user", "content": prompt}], "temperature": 0.4}
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
-        if r.status_code == 200: return r.json()['choices'][0]['message']['content']
-    except: return None
+    models = [
+        "meta/llama3-70b-instruct",
+        "nvidia/nemotron-4-340b-instruct"
+    ]
+    for model in models:
+        try:
+            print(f"🧠 NVIDIA Model: {model}")
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.35,
+                "max_tokens": 2500
+            }
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            if r.status_code == 200:
+                return r.json()['choices'][0]['message']['content']
+            time.sleep(5)
+        except:
+            continue
+    return None
 
 def call_gemini(prompt):
-    models = ["gemini-1.5-pro", "gemini-2.0-flash"]
+    models = [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.0-pro",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash"
+    ]
     for key in GEMINI_KEYS:
         try:
             genai.configure(api_key=key)
             for model_name in models:
-                print(f"🤖 Gemini: {model_name}")
-                model = genai.GenerativeModel(model_name)
-                res = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.4))
-                if res and res.text: return res.text
-        except: continue
+                try:
+                    print(f"🤖 Gemini Model: {model_name}")
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(
+                        prompt,
+                        generation_config=genai.types.GenerationConfig(temperature=0.4)
+                    )
+                    if response and response.text:
+                        return response.text
+                    time.sleep(5)
+                except:
+                    continue
+        except:
+            continue
     return None
 
 def generate_questions(text, section):
     prompt = build_afo_prompt(text, section)
     
     raw = call_openrouter(prompt)
-    if raw: return extract_and_clean_json(raw)
+    if raw:
+        return extract_and_clean_json(raw)
+        
+    print("⚠️ OpenRouter failed → waiting before next provider")
+    time.sleep(10)
     
     raw = call_nvidia(prompt)
-    if raw: return extract_and_clean_json(raw)
+    if raw:
+        return extract_and_clean_json(raw)
+        
+    print("⚠️ NVIDIA failed → waiting before Gemini")
+    time.sleep(10)
     
     raw = call_gemini(prompt)
-    if raw: return extract_and_clean_json(raw)
-    
+    if raw:
+        return extract_and_clean_json(raw)
+        
     print("❌ All AI providers failed")
     return None
 
 # ==========================================
-# 8. MAIN WORKFLOW (RAM SAFE)
+# 8. MAIN WORKFLOW (RAM Optimization Updated)
 # ==========================================
 def main_workflow():
     pdf_path = "book.pdf"
     if not os.path.exists(pdf_path):
         print("📥 Downloading PDF...")
-        gdown.download(f"https://drive.google.com/uc?id={DRIVE_FILE_ID}", pdf_path, quiet=False)
+        gdown.download(f"[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){DRIVE_FILE_ID}", pdf_path, quiet=False)
     
-    # Get total pages once
     doc = fitz.open(pdf_path)
     total_pages = doc.page_count
     doc.close()
@@ -278,7 +332,6 @@ def main_workflow():
             section = get_section(curr_page)
             print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
 
-            # Open document strictly inside the loop to save RAM
             doc = fitz.open(pdf_path)
             text = ""
             for i in range(curr_page, next_page):
@@ -309,12 +362,16 @@ def main_workflow():
             
             update_tracker(next_page)
             curr_page = next_page
+            print("⏳ Cooldown for 20 seconds...")
             time.sleep(20)
 
         except Exception as e:
             print(f"❌ Loop error: {e}")
             time.sleep(60)
         finally:
+            # RAM Optimization Rule #9 Added here
+            text = None
+            questions = None
             gc.collect()
 
 # ==========================================
