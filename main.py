@@ -4,33 +4,33 @@ import json
 import time
 import re
 import gc
-from datetime import datetime, timedelta
 import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
-from google import genai
 import pypdf
 import gdown
+from flask import Flask
+from threading import Thread
 
-# Try pymupdf for better PDF extraction (optional)
-try:
-    import pymupdf
-    PYMU = True
-except ImportError:
-    PYMU = False
-    print("⚠️ pymupdf not installed. Install with: pip install pymupdf (better text extraction)")
-
-sys.stdout.reconfigure(line_buffering=True)
+# --- IMPORTS FOR OCR ---
+from pdf2image import convert_from_path
+import pytesseract
+from PIL import Image
 
 # ==========================================
-# 1. MASTER CONTROL (Disabled to protect your data)
+# 1. SETUP & ENVIRONMENT VARIABLES
 # ==========================================
-TOTAL_WIPE_OUT = False   # Set to False completely to ensure your data is safe.
+NVIDIA_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
+OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEYS", "").split(",") if k.strip()]
+GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()]
 
-# ==========================================
-# 2. SECTION MAPPING (your page ranges)
-# ==========================================
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
+SHEET_ID = os.getenv("SHEET_ID", "").strip()
+DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "").strip()
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
+
+# Strict Section Mapping
 SECTION_RANGES = [
     (1, 75, "Agronomy"), (76, 242, "Horticulture"), (243, 308, "Entomology"),
     (309, 389, "Fisheries"), (390, 517, "Animal Husbandry"), (518, 557, "Plant Pathology"),
@@ -42,360 +42,275 @@ SECTION_RANGES = [
     (967, 1075, "Soil Science")
 ]
 
-def get_section_by_page(page_num):
-    actual_page = page_num + 1
-    for start, end, name in SECTION_RANGES:
-        if start <= actual_page <= end:
-            return name
-    return "General Agriculture"
-
 # ==========================================
-# 3. ENVIRONMENT & CONNECTIONS
+# 2. DATABASE & GOOGLE SHEETS CONNECTION
 # ==========================================
-OPENROUTER_KEYS = os.getenv("OPENROUTER_KEYS", "").split(",")
-GEMINI_KEYS = os.getenv("GEMINI_KEYS", "").split(",")
-MONGO_URI = os.getenv("MONGO_URI")
-SHEET_ID = "1cPPxwPTgDHfKAwLc_7ZG9WsAMUhYsiZrbJhfV0gN6W4"
-DRIVE_FILE_ID = "1dzPl2G-vVjK7zSMCWAyq34uMrX-RamiS"
-SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
-
-OPENROUTER_MODEL = "openrouter/free"
-OPENROUTER_TEMPERATURE = 0.4
-
-GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
-GEMINI_TEMPERATURE = 0.4
-
-if not GEMINI_KEYS or GEMINI_KEYS == ['']:
-    raise ValueError("❌ GEMINI_KEYS not set")
-if not MONGO_URI:
-    raise ValueError("❌ MONGO_URI not set")
-if not SERVICE_ACCOUNT_JSON:
-    raise ValueError("❌ SERVICE_ACCOUNT_JSON not set")
-
-OPENROUTER_KEYS = [k.strip() for k in OPENROUTER_KEYS if k.strip()]
-GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS if k.strip()]
-
-# MongoDB
+print("🔄 Connecting to MongoDB...")
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client['agri_data_bank']
-progress_collection = db['process_tracker']
-config_collection = db['config']
-print("✅ MongoDB Connection: SUCCESS")
+tracker_col = db['process_tracker']
 
-# Google Sheets
+print("🔄 Connecting to Google Sheets...")
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
-print("✅ Google Sheets Connection: SUCCESS")
 
 # ==========================================
-# 4. TRACKER & RESET (persistent)
+# 3. TRACKER & ONE-TIME SHEET CLEAR LOGIC
 # ==========================================
-def get_current_page():
+def init_tracker_and_sheet():
+    tracker = tracker_col.find_one({"_id": "pdf_tracker"})
+    if not tracker:
+        print("⚠️ First Time Run Detected! Clearing Sheet & Setting Page 2...")
+        sheet.clear()
+        headers = ["Section", "Question", "Option 1", "Option 2", "Option 3", "Option 4", "Option 5", "Answer", "Explanation"]
+        sheet.append_row(headers)
+        tracker_col.insert_one({"_id": "pdf_tracker", "current_page": 1, "has_cleared_sheet": True})
+        return 1
+    else:
+        p = tracker.get("current_page", 1)
+        print(f"✅ Restarting safely from Page {p+1} (Index {p}). Data is protected.")
+        return p
+
+def update_tracker(page_num):
+    tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}})
+
+def get_section(p_idx):
+    human_page = p_idx + 1
+    for s, e, name in SECTION_RANGES:
+        if s <= human_page <= e: return name
+    return "General Agriculture"
+
+# ==========================================
+# 3.5 OCR TEXT EXTRACTION (PRO OPTIMIZED)
+# ==========================================
+def extract_text_with_ocr(reader, pdf_path, page_index):
+    text = reader.pages[page_index].extract_text()
+
+    if text and len(text.strip()) > 100:
+        return text
+
+    print(f"🔍 High-Res OCR activated for Page {page_index+1}")
     try:
-        tracker = progress_collection.find_one({"_id": "pdf_tracker"})
-        return tracker.get("current_page", 0) if tracker else 0
-    except:
-        return 0
-
-def update_current_page(page_num):
-    progress_collection.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
-    print(f"📌 Page tracker updated to {page_num} (page {page_num+1} in 1‑index)")
-
-def perform_total_wipeout():
-    # Intentionally disabled to protect your data
-    print("⚠️ Wipeout function called but disabled for safety. No data deleted.")
-    pass
-
-# ==========================================
-# 5. PDF TEXT EXTRACTION
-# ==========================================
-def extract_pdf_text(start_page, end_page, pdf_path="book.pdf"):
-    if not os.path.exists(pdf_path):
+        images = convert_from_path(
+            pdf_path,
+            first_page=page_index + 1,
+            last_page=page_index + 1,
+            dpi=300
+        )
+        
+        ocr_text = ""
+        for img in images:
+            gray = img.convert("L")  # Convert to Grayscale for better contrast
+            ocr_text += pytesseract.image_to_string(
+                gray,
+                lang="eng",
+                config="--oem 3 --psm 6"
+            )
+        return ocr_text
+    except Exception as e:
+        print(f"⚠️ OCR Error on Page {page_index+1}: {e}")
         return ""
-    try:
-        reader = pypdf.PdfReader(pdf_path)
-        total_pages = len(reader.pages)
-    except:
-        total_pages = 0
-        
-    if start_page >= total_pages:
-        return None
-        
-    actual_end = min(end_page, total_pages)
-    print(f"📖 Extracting pages {start_page+1} to {actual_end}")
-    all_text = []
-    
-    for p in range(start_page, actual_end):
-        page_text = ""
-        # Try pypdf first
-        try:
-            page_text = reader.pages[p].extract_text()
-            if page_text and page_text.strip():
-                all_text.append(page_text.strip())
-                continue
-        except:
-            pass
-            
-        # Try pymupdf if available (better for formatted text)
-        if PYMU:
-            try:
-                doc = pymupdf.open(pdf_path)
-                page = doc[p]
-                page_text = page.get_text("text") 
-                doc.close()
-                if page_text and page_text.strip():
-                    all_text.append(page_text.strip())
-                    continue
-            except:
-                pass
-                
-        print(f"⚠️ No text extracted from page {p+1} (It might be a scanned image/blank)")
-        
-    combined = "\n".join(all_text).strip()
-    if not combined:
-        print(f"❌ No text at all for pages {start_page+1}-{actual_end}")
-    return combined if combined else ""
 
 # ==========================================
-# 6. FULL PROMPT
+# 4. THE AI BRAIN (PROMPT & PARSING)
 # ==========================================
-def build_prompt(text_chunk, section_name):
-    truncated = text_chunk[:6000]
-    full_prompt = f"""You are a professional agriculture exam question setter for UPSSSC AGTA and IBPS AFO (Mains level).
-Based on the provided text, generate between 15 and 20 high‑quality conceptual questions.
+def build_afo_prompt(text, section):
+    return f"""
+You are a Professional Agriculture Examiner and Senior Question Setter 
+for competitive exams such as IBPS AFO Mains and UPSSSC AGTA.
 
-CRITICAL RULES:
-1. Level: MODERATE (conceptual and professional).
-2. Questions MUST be 2 to 3 lines long. DO NOT use phrases like "According to the text".
-3. Return ONLY a valid JSON list. No code blocks, no markdown, no text explanations.
-4. Provide exactly 5 options as fields named opt1, opt2, opt3, opt4, opt5. The correct answer must be placed in the "answer" field as the exact text of the correct option.
-5. The "section" field must be set to the value we provide: "{section_name}".
-6. Each object must have: section, question, opt1, opt2, opt3, opt4, opt5, answer.
+TASK
+You will receive TEXT extracted from TWO BOOK PAGES.
+Your job is to read the text carefully and generate high-quality 
+professional MCQ questions strictly from the provided content.
 
-Now, generate between 15 and 20 questions from the text below. Follow the exact format: each question as a JSON object with section (set to "{section_name}"), question, opt1, opt2, opt3, opt4, opt5, answer.
+STRICT RULE
+• Use ONLY the information present in the provided text.
+• Do NOT add external knowledge.
+• Do NOT assume facts not written in the text.
+• Extract exam-oriented facts, concepts, numbers, varieties, diseases, etc.
 
-Text Source:
-{truncated}
+Topic / Section: {section}
+
+LANGUAGE
+All questions must be written in **Professional Examiner-Level English**.
+
+QUESTION REQUIREMENTS
+1. Question Length: Each question must contain **20–35 words**.
+2. Mix Ratio: 60% Conceptual, 10% Statement-based, 30% Fact-based.
+3. Options: Each question MUST contain **exactly 5 distinct options**.
+4. Explanation: Provide a **1–2 line conceptual explanation** for the correct answer.
+
+QUESTION COUNT RULE (IMPORTANT)
+• Limited info → **5–8 questions**
+• Moderate info → **8–12 questions**
+• Rich technical data → **12–20 questions**
+
+OUTPUT FORMAT (CRITICAL)
+Return ONLY a valid **JSON array**. Do NOT include Markdown, Code blocks, or text outside JSON.
+
+JSON STRUCTURE
+[
+  {{
+    "section": "{section}",
+    "question": "Question text here...",
+    "opt1": "Option A",
+    "opt2": "Option B",
+    "opt3": "Option C",
+    "opt4": "Option D",
+    "opt5": "Option E",
+    "answer": "Exact text of the correct option",
+    "explanation": "Short conceptual explanation."
+  }}
+]
+
+SOURCE TEXT
+{text[:7000]}
 """
-    return full_prompt
+
+def extract_json_from_response(raw_text):
+    try:
+        match = re.search(r'\[\s*{.*}\s*\]', raw_text, re.DOTALL)
+        if match: return json.loads(match.group(0))
+        else: return json.loads(raw_text)
+    except Exception as e:
+        print(f"⚠️ JSON Parsing failed. Error: {e}")
+        return None
 
 # ==========================================
-# 7. OPENROUTER & GEMINI QUESTION GENERATION
+# 5. API ROTATION LOGIC
 # ==========================================
-def parse_questions(response_text, default_section):
-    clean = re.sub(r'```json\n|\n```|```', '', response_text).strip()
-    json_match = re.search(r'\[[\s\S]*\]', clean)
-    if not json_match:
-        raise ValueError("No JSON array found")
-    try:
-        raw = json.loads(json_match.group(0))
-    except json.JSONDecodeError as e:
-        fixed = re.sub(r',\s*}', '}', json_match.group(0))
-        fixed = re.sub(r',\s*\]', ']', fixed)
+def call_nvidia(prompt):
+    print("🧠 Using Primary Brain: NVIDIA (Nemotron-70B)...")
+    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
+    payload = {"model": "nvidia/llama-3.1-nemotron-70b-instruct", "messages": [{"role": "user", "content": prompt}], "temperature": 0.4}
+    r = requests.post(url, headers=headers, json=payload, timeout=50)
+    r.raise_for_status()
+    return r.json()['choices'][0]['message']['content']
+
+def call_openrouter(prompt):
+    for key in OPENROUTER_KEYS:
         try:
-            raw = json.loads(fixed)
-        except:
-            raise ValueError(f"JSON decode error: {e}")
-            
-    if not isinstance(raw, list):
-        raw = [raw]
-        
-    valid = []
-    for q in raw:
-        if not isinstance(q, dict):
-            continue
-        if 'options' in q and isinstance(q['options'], list):
-            opts = q['options']
-            while len(opts) < 5:
-                opts.append("")
-            for i, opt in enumerate(opts[:5], 1):
-                q[f'opt{i}'] = opt
-            del q['options']
-            
-        required = ['question', 'opt1', 'opt2', 'opt3', 'opt4', 'opt5', 'answer']
-        if not all(k in q for k in required):
-            continue
-        if 'section' not in q or not q['section']:
-            q['section'] = default_section
-        valid.append(q)
-        
-    if len(valid) < 15:
-        raise ValueError(f"Only {len(valid)} valid questions (need 15)")
-    return valid[:20]
+            print(f"🔄 Using Secondary Brain: OpenRouter (Key: {key[:5]}...)")
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {"model": "meta-llama/llama-3.1-70b-instruct", "messages": [{"role": "user", "content": prompt}]}
+            r = requests.post(url, headers=headers, json=payload, timeout=50)
+            if r.status_code == 200: return r.json()['choices'][0]['message']['content']
+        except: continue
+    raise Exception("All OpenRouter keys failed.")
 
-def call_openrouter(api_key, prompt):
-    url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": OPENROUTER_TEMPERATURE,
-        "max_tokens": 2000
-    }
-    response = requests.post(url, headers=headers, json=payload, timeout=120)
-    if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"]
-    elif response.status_code == 402:
-        raise Exception("INSUFFICIENT_CREDITS")
-    else:
-        raise Exception(f"OpenRouter error {response.status_code}: {response.text[:200]}")
-
-def generate_questions(text_chunk, section_name):
-    prompt = build_prompt(text_chunk, section_name)
-    max_attempts = len(OPENROUTER_KEYS) + len(GEMINI_KEYS) * len(GEMINI_MODELS)
-    total = 0
-
-    # OpenRouter
-    if OPENROUTER_KEYS:
-        for key_idx, api_key in enumerate(OPENROUTER_KEYS):
-            total += 1
-            for retry in range(2):
-                print(f"🌐 Attempt {total}/{max_attempts} (retry {retry+1}/2): OpenRouter key {key_idx}")
-                try:
-                    resp = call_openrouter(api_key, prompt)
-                    qs = parse_questions(resp, section_name)
-                    print(f"✅ Generated {len(qs)} questions using OpenRouter")
-                    return qs
-                except Exception as e:
-                    err = str(e)
-                    print(f"⚠️ OpenRouter key {key_idx} failed: {err[:150]}")
-                    if "INSUFFICIENT_CREDITS" in err or "402" in err:
-                        break
-                    time.sleep(5)
-            time.sleep(2)
-
-    # Gemini
-    for key_idx, api_key in enumerate(GEMINI_KEYS):
-        for model in GEMINI_MODELS:
-            total += 1
-            print(f"🤖 Attempt {total}/{max_attempts}: Gemini key {key_idx}, model {model}")
+def call_gemini(prompt):
+    for key in GEMINI_KEYS:
+        for model in ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"]:
             try:
-                client = genai.Client(api_key=api_key)
-                resp = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config={"temperature": GEMINI_TEMPERATURE, "max_output_tokens": 2000}
-                )
-                qs = parse_questions(resp.text, section_name)
-                print(f"✅ Generated {len(qs)} questions using Gemini/{model}")
-                return qs
-            except Exception as e:
-                err = str(e)
-                print(f"⚠️ Gemini {model} failed: {err[:150]}")
-                if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                    print("⏳ API Limit hit! Waiting for 60 seconds before retrying...")
-                    time.sleep(60)
-                else:
-                    time.sleep(5)
-                continue
+                print(f"⚔️ Using Army Backup: Gemini ({model})")
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+                payload = {"contents": [{"parts": [{"text": prompt}]}]}
+                r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=50)
+                if r.status_code == 200: return r.json()['candidates'][0]['content']['parts'][0]['text']
+            except: continue
+    raise Exception("All Gemini keys failed.")
 
-    print(f"🚨 All attempts exhausted. Waiting 2 minutes to cool down API...")
-    time.sleep(120)
-    return generate_questions(text_chunk, section_name)
+def generate_questions(text, section):
+    prompt = build_afo_prompt(text, section)
+    raw_response = None
+    try: raw_response = call_nvidia(prompt)
+    except Exception as e:
+        print(f"⚠️ NVIDIA Error: {e}")
+        try: raw_response = call_openrouter(prompt)
+        except Exception as e2:
+            print(f"⚠️ OpenRouter Error: {e2}")
+            try: raw_response = call_gemini(prompt)
+            except Exception as e3:
+                print(f"❌ Critical: All AI Providers failed.")
+                return None
+    if raw_response: return extract_json_from_response(raw_response)
+    return None
 
 # ==========================================
-# 8. MAIN LOOP
+# 6. MASTER WORKFLOW
 # ==========================================
-def main():
-    try:
-        from keep_alive import keep_alive
-        keep_alive()
-    except ImportError:
-        pass
-        
-    print("🚀 Agri-Bot System Initiated.")
-    
-    # ---------------------------------------------------------
-    # SAFETY LOCK & FORCE PAGE 23
-    # ---------------------------------------------------------
-    print("🛑 WIPE OUT DISABLED: Aapka Google Sheet data safe hai.")
-    
-    # Force the tracker to Page 23 (Index 22)
-    print("⏩ Forcing script to start from Page 23 as requested...")
-    update_current_page(22) 
-    
-    pdf = "book.pdf"
-    if not os.path.exists(pdf):
-        print("📥 Downloading book...")
-        # Fixed URL string issue here (No markdown hidden links)
-        url = "[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=)" + DRIVE_FILE_ID.strip()
-        gdown.download(url, pdf, quiet=False)
-        if not os.path.exists(pdf):
-            print("❌ Download failed.")
-            return
-        print(f"✅ Downloaded: {os.path.getsize(pdf)} bytes")
-    else:
-        print(f"✅ PDF exists: {pdf}")
-    
-    print("\n" + "="*60)
-    print("📖 PROCESSING (3 pages/chunk, 15–20 questions)")
-    print("="*60 + "\n")
-    
-    total_q = 0
-    errors = 0
+def main_workflow():
+    pdf_path = "book.pdf"
+    if not os.path.exists(pdf_path):
+        print("📥 Downloading PDF Book...")
+        gdown.download(f"https://drive.google.com/uc?id={DRIVE_FILE_ID}", pdf_path, quiet=False)
+
+    print("\n🚀 Starting PDF Processing Engine...")
+    reader = pypdf.PdfReader(pdf_path)
     
     while True:
         try:
-            page = get_current_page()
-            next_page = page + 3
-            section = get_section_by_page(page)
-            print(f"\n🔍 Chunk: pages {page+1} to {next_page} | Section: {section}")
+            curr_page = init_tracker_and_sheet()
+            next_page = curr_page + 2
+            section = get_section(curr_page)
             
-            text = extract_pdf_text(page, next_page, pdf)
-            if text is None:
-                print("🏁 End of PDF reached.")
+            print(f"\n📖 Scanning Pages: {curr_page+1} to {next_page} | Topic: {section}")
+            
+            if curr_page >= len(reader.pages):
+                print("🏁 Book completely processed!")
                 break
+                
+            text = ""
+            for i in range(curr_page, min(next_page, len(reader.pages))):
+                extracted = extract_text_with_ocr(reader, pdf_path, i)
+                if extracted:
+                    text += extracted + "\n"
             
-            # If PDF is scanned images, it will trigger this block
-            if len(text.strip()) < 150:
-                print(f"⚠️ Insufficient text ({len(text)} chars) on pages {page+1}-{next_page}. These pages might be scanned photos.")
-                print("⏩ Skipping to next chunk...")
-                update_current_page(next_page)
-                gc.collect()
-                time.sleep(3) 
+            if not text or len(text.strip()) < 50:
+                print("⚠️ Page is completely blank or unreadable. Skipping chunk.")
+                update_tracker(next_page)
                 continue
-            
-            print(f"🧠 Generating questions ({len(text)} chars) for {section}")
+
             questions = generate_questions(text, section)
             
-            if not questions:
-                print("⚠️ No questions generated. Skipping chunk.")
-                update_current_page(next_page)
-                gc.collect()
-                time.sleep(5)
-                continue
-            
-            rows = []
-            for q in questions:
-                rows.append([
-                    q.get("section", section),
-                    q.get("question", ""),
-                    q.get("opt1", ""), q.get("opt2", ""), q.get("opt3", ""),
-                    q.get("opt4", ""), q.get("opt5", ""), q.get("answer", "")
-                ])
-            sheet.append_rows(rows, value_input_option="RAW")
-            total_q += len(questions)
-            print(f"✅ Appended {len(questions)} questions to {section} (total {total_q})")
-            
-            update_current_page(next_page)
-            errors = 0
-            del text, questions, rows
-            gc.collect()
-            print("⏳ Success gap: 30 seconds")
-            time.sleep(30)
+            if questions and isinstance(questions, list) and len(questions) > 0:
+                rows_to_insert = []
+                for q in questions:
+                    rows_to_insert.append([
+                        q.get("section", section), q.get("question", ""),
+                        q.get("opt1", ""), q.get("opt2", ""), q.get("opt3", ""), q.get("opt4", ""), q.get("opt5", ""),
+                        q.get("answer", ""), q.get("explanation", "")
+                    ])
+                
+                sheet.append_rows(rows_to_insert, value_input_option="RAW")
+                print(f"✅ Success: Appended {len(rows_to_insert)} questions to Sheet.")
+                update_tracker(next_page)
+            else:
+                print("⚠️ AI generated invalid format or empty list. Skipping chunk.")
+                update_tracker(next_page)
+                
+            print("⏳ Cooldown for 20 seconds...")
+            time.sleep(20)
             
         except Exception as e:
-            print(f"❌ Loop error: {e}")
-            errors += 1
-            if errors > 10:
-                print("Too many errors, stopping.")
-                break
+            print(f"❌ Main Loop Exception: {e}")
             time.sleep(60)
-    
-    print(f"\n📊 FINAL: {total_q} questions in Google Sheets.")
+            
+        finally:
+            gc.collect()
+
+# ==========================================
+# 7. FLASK SERVER (KEEP-ALIVE FOR RENDER)
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Agri-Bot Mains Engine is LIVE and Processing 24/7!"
+
+def run_server():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    main()
+    server_thread = Thread(target=run_server)
+    server_thread.daemon = True
+    server_thread.start()
+    
+    main_workflow()
