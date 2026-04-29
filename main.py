@@ -8,17 +8,16 @@ import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
-import pypdf
+import fitz  # PyMuPDF: Best for large 117MB PDFs
 import gdown
 from flask import Flask
 from threading import Thread
 from pdf2image import convert_from_path
 import pytesseract
-from PIL import Image
 import google.generativeai as genai
 
 # ==========================================
-# 1. ENVIRONMENT VARIABLES (with validation)
+# 1. ENVIRONMENT VARIABLES
 # ==========================================
 NVIDIA_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEYS", "").split(",") if k.strip()]
@@ -60,21 +59,26 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ==========================================
-# 3. TRACKER - FORCE START FROM PAGE 1
+# 3. TRACKER (FORCE RESET LOGIC)
 # ==========================================
 def init_tracker_and_sheet():
-    try:
-        print("🔁 Reset Mode: Starting from Page 1 (Index 0)")
+    # Note: Changed ID to "sheet_init_v2" to force a fresh wipe right now.
+    reset_flag = tracker_col.find_one({"_id": "sheet_init_v2"})
+    
+    if not reset_flag:
+        print("🔁 CLEAN START: Wiping Google Sheet and resetting to Page 1...")
+        sheet.clear()
+        headers = ["Section", "Question", "Option 1", "Option 2", "Option 3", "Option 4", "Option 5", "Answer", "Explanation"]
+        sheet.append_row(headers)
+        
+        tracker_col.update_one({"_id": "sheet_init_v2"}, {"$set": {"done": True}}, upsert=True)
         tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": 0}}, upsert=True)
-        if tracker_col.find_one({"_id": "pdf_tracker_reset_done"}) is None:
-            sheet.clear()
-            headers = ["Section", "Question", "Option 1", "Option 2", "Option 3", "Option 4", "Option 5", "Answer", "Explanation"]
-            sheet.append_row(headers)
-            tracker_col.insert_one({"_id": "pdf_tracker_reset_done", "done": True})
         return 0
-    except Exception as e:
-        print(f"❌ Tracker error: {e}")
-        sys.exit(1)
+    else:
+        tracker = tracker_col.find_one({"_id": "pdf_tracker"})
+        page = tracker.get("current_page", 0) if tracker else 0
+        print(f"✅ Safe Restart: Resuming from Page {page+1} (Index {page})")
+        return page
 
 def update_tracker(page_num):
     tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}})
@@ -82,26 +86,22 @@ def update_tracker(page_num):
 def get_section(p_idx):
     human_page = p_idx + 1
     for s, e, name in SECTION_RANGES:
-        if s <= human_page <= e:
-            return name
+        if s <= human_page <= e: return name
     return "General Agriculture"
 
 # ==========================================
-# 4. OCR WITH POPPLER PATH
+# 4. FAST TEXT EXTRACTION
 # ==========================================
-def extract_text_with_ocr(reader, pdf_path, page_index):
-    text = reader.pages[page_index].extract_text()
+def extract_text_with_ocr(doc, pdf_path, page_index):
+    page = doc.load_page(page_index)
+    text = page.get_text()
+    
     if text and len(text.strip()) > 100:
         return text
-    print(f"🔍 OCR Page {page_index+1}")
+        
+    print(f"🔍 Empty Page! OCR activated for Page {page_index+1}")
     try:
-        images = convert_from_path(
-            pdf_path,
-            first_page=page_index+1,
-            last_page=page_index+1,
-            dpi=300,
-            poppler_path="/usr/bin"
-        )
+        images = convert_from_path(pdf_path, first_page=page_index+1, last_page=page_index+1, dpi=300, poppler_path="/usr/bin")
         ocr_text = ""
         for img in images:
             gray = img.convert("L")
@@ -112,284 +112,221 @@ def extract_text_with_ocr(reader, pdf_path, page_index):
         return ""
 
 # ==========================================
-# 5. IMPROVED AFO-LEVEL PROMPT (20-35 words)
+# 5. PROFESSIONAL PROMPT (AGTA 2026 & AFO Moderate Level)
 # ==========================================
 def build_afo_prompt(text, section):
-    return f"""
-You are an expert agriculture exam paper setter for IBPS AFO Mains, NABARD Grade A, and ICAR JRF level.
+    examples = """
+EXAMPLES OF GOOD QUESTIONS (IBPS AFO Mains Level):
 
-Generate high quality MCQs from the given agriculture content.
+Q: The excretory organ of silkworm which is located at the junction of the midgut and hindgut.
+Options: Proboscis | Malpighian tubule | Nephridia | Green glands | None
+Answer: Malpighian tubule
+
+Q: Ufra disease in rice is caused by ___
+Options: Bacteria | Nematode | Virus | Fungus | None
+Answer: Nematode
+
+Q: Sand percentage in sandy soil is
+Options: 40% | 60% | 80% | 20% | 45%
+Answer: 80%
+
+Q: The process of removing the green colouring (known as chlorophyll) from the skin of citrus fruit by introducing ethylene gas is known as
+Options: Ripening | Degreening | Physiological maturity | Denavelling | Dehusking
+Answer: Degreening
+"""
+
+    return f"""
+You are Satyam Sir, an expert agriculture mentor setting a mock paper for the AGTA 2026 and IBPS AFO Mains batches.
+
+Your task: Generate high-quality, MODERATE LEVEL multiple-choice questions from the given agricultural content. Do not make them overly hard, keep them engaging and highly relevant to competitive exams.
 
 STRICT RULES:
+1. Moderate Difficulty: Focus on key terms, clear processes, and important data.
+2. Structure: 20-35 words per question. Exactly 5 options per question.
+3. Formatting: Do NOT output prefixes like "Option A:" or "1)". Provide plain text.
+4. Output Limit: Maximum 10 questions per chunk.
 
-1. Each question MUST be 20–35 words long.
-2. Questions must be conceptual, analytical, and exam-oriented.
-3. DO NOT use phrases like:
-   - "According to the text"
-   - "Based on the passage"
-   - "From the given text"
-4. Questions must resemble real competitive exam questions (IBPS AFO Mains standard).
-5. Each question must have exactly 5 distinct options.
-6. Provide correct answer and a short conceptual explanation (20–30 words).
+Topic: {section}
 
-QUESTION COUNT RULE (based on content density):
-- Rich technical content → 12–15 MCQs
-- Moderate content → 6–10 MCQs
-- Limited content → 3–5 MCQs
+{examples}
 
-DO NOT create unnecessary or repetitive questions.
+OUTPUT FORMAT:
+You MUST return ONLY a RAW JSON ARRAY. No markdown block formatting (do not use ```json). Just the array.
+[
+  {{
+    "section": "{section}",
+    "question": "Question text here...",
+    "opt1": "First option text",
+    "opt2": "Second option text",
+    "opt3": "Third option text",
+    "opt4": "Fourth option text",
+    "opt5": "Fifth option text",
+    "answer": "Exact text of the correct option",
+    "explanation": "Short conceptual explanation (20 words max)."
+  }}
+]
 
-OUTPUT FORMAT (CSV only):
-Section,Question,Option1,Option2,Option3,Option4,Option5,Answer,Explanation
-
-Topic/Section: {section}
-
-Agriculture Content:
+Content:
 {text[:7000]}
 """
 
-def extract_csv_from_response(raw_text):
-    lines = raw_text.strip().split('\n')
-    if lines and 'Section' in lines[0]:
-        lines = lines[1:]
-    data = []
-    for line in lines:
-        if line.strip() and ',' in line:
-            parts = line.split(',')
-            if len(parts) >= 9:
-                data.append({
-                    "section": parts[0],
-                    "question": parts[1],
-                    "opt1": parts[2],
-                    "opt2": parts[3],
-                    "opt3": parts[4],
-                    "opt4": parts[5],
-                    "opt5": parts[6],
-                    "answer": parts[7],
-                    "explanation": parts[8]
-                })
-    if data:
-        return data
-    # Fallback to JSON
+# ==========================================
+# 6. JSON PARSER (FIXES SHEET FORMATTING CORRUPTION)
+# ==========================================
+def extract_and_clean_json(raw_text):
     try:
-        match = re.search(r'\[\s*{.*}\s*\]', raw_text, re.DOTALL)
+        # Extract json array even if AI adds extra text
+        match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
         if match:
-            return json.loads(match.group(0))
-    except:
-        pass
-    return None
+            data = json.loads(match.group(0))
+        else:
+            data = json.loads(raw_text)
+            
+        cleaned_data = []
+        for item in data[:10]: # Enforce max 10
+            cleaned_data.append({
+                "section": str(item.get("section", "")).strip(),
+                "question": str(item.get("question", "")).strip(),
+                # Removes any "Option1:", "A)", or "1." the AI might accidentally include
+                "opt1": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt1", "")), flags=re.IGNORECASE).strip(),
+                "opt2": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt2", "")), flags=re.IGNORECASE).strip(),
+                "opt3": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt3", "")), flags=re.IGNORECASE).strip(),
+                "opt4": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt4", "")), flags=re.IGNORECASE).strip(),
+                "opt5": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt5", "")), flags=re.IGNORECASE).strip(),
+                "answer": re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("answer", "")), flags=re.IGNORECASE).strip(),
+                "explanation": str(item.get("explanation", "")).strip()
+            })
+        return cleaned_data
+    except Exception as e:
+        print(f"⚠️ JSON Parsing failed: {e}")
+        return None
 
 # ==========================================
-# 6. NVIDIA MULTI-MODEL (Correct models)
-# ==========================================
-def call_nvidia(prompt):
-    url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_KEY}",
-        "Content-Type": "application/json"
-    }
-    NVIDIA_MODELS = [
-        "nvidia/llama-3.1-nemotron-70b-instruct",
-        "meta/llama-3.1-70b-instruct",
-        "meta/llama-3.1-8b-instruct",
-        "mistralai/mixtral-8x7b-instruct",
-        "mistralai/mistral-7b-instruct"
-    ]
-    for model in NVIDIA_MODELS:
-        try:
-            print(f"🧠 Trying NVIDIA model: {model}")
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.4,
-                "top_p": 0.9,
-                "max_tokens": 2500
-            }
-            r = requests.post(url, headers=headers, json=payload, timeout=60)
-            if r.status_code == 200:
-                return r.json()['choices'][0]['message']['content']
-            else:
-                print(f"⚠️ NVIDIA {model} HTTP {r.status_code}")
-        except Exception as e:
-            print(f"⚠️ NVIDIA {model} error: {e}")
-            continue
-    return None
-
-# ==========================================
-# 7. OPENROUTER MULTI-MODEL (as you provided)
+# 7. AI FALLBACK ENGINE
 # ==========================================
 def call_openrouter(prompt):
-    OPENROUTER_MODELS = [
-        "mistralai/mixtral-8x7b-instruct",
-        "mistralai/mistral-7b-instruct",
-        "meta-llama/llama-3-70b-instruct",
-        "meta-llama/llama-3-8b-instruct",
-        "google/gemma-7b-it"
-    ]
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    models = ["mistralai/mixtral-8x7b-instruct", "meta-llama/llama-3-70b-instruct"]
+    url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
     for key in OPENROUTER_KEYS:
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json"
-        }
-        for model in OPENROUTER_MODELS:
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        for model in models:
             try:
-                print(f"🔄 Trying OpenRouter model: {model}")
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.35,
-                    "top_p": 0.9,
-                    "max_tokens": 2500
-                }
-                r = requests.post(url, headers=headers, json=payload, timeout=90)
-                if r.status_code == 200:
-                    data = r.json()
-                    if "choices" in data and data["choices"]:
-                        return data["choices"][0]["message"]["content"]
-            except Exception as e:
-                print(f"⚠️ OpenRouter {model} failed: {e}")
-                continue
+                print(f"🔄 OpenRouter: {model}")
+                payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.4}
+                r = requests.post(url, headers=headers, json=payload, timeout=60)
+                if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
+            except: continue
     return None
 
-# ==========================================
-# 8. GEMINI MULTI-MODEL (as you provided)
-# ==========================================
+def call_nvidia(prompt):
+    url = "[https://integrate.api.nvidia.com/v1/chat/completions](https://integrate.api.nvidia.com/v1/chat/completions)"
+    headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
+    try:
+        print("🧠 NVIDIA: nemotron-70b")
+        payload = {"model": "nvidia/llama-3.1-nemotron-70b-instruct", "messages": [{"role": "user", "content": prompt}], "temperature": 0.4}
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        if r.status_code == 200: return r.json()['choices'][0]['message']['content']
+    except: return None
+
 def call_gemini(prompt):
-    GEMINI_MODELS = [
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.0-pro",
-        "gemini-2.0-flash",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash"
-    ]
+    models = ["gemini-1.5-pro", "gemini-2.0-flash"]
     for key in GEMINI_KEYS:
         try:
             genai.configure(api_key=key)
-            for model_name in GEMINI_MODELS:
-                try:
-                    print(f"🤖 Trying Gemini {model_name}")
-                    model = genai.GenerativeModel(model_name)
-                    response = model.generate_content(prompt)
-                    if response and response.text:
-                        return response.text
-                except Exception as e:
-                    print(f"⚠️ Gemini {model_name} failed: {e}")
-                    continue
-        except:
-            continue
+            for model_name in models:
+                print(f"🤖 Gemini: {model_name}")
+                model = genai.GenerativeModel(model_name)
+                res = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.4))
+                if res and res.text: return res.text
+        except: continue
+    return None
+
+def generate_questions(text, section):
+    prompt = build_afo_prompt(text, section)
+    
+    raw = call_openrouter(prompt)
+    if raw: return extract_and_clean_json(raw)
+    
+    raw = call_nvidia(prompt)
+    if raw: return extract_and_clean_json(raw)
+    
+    raw = call_gemini(prompt)
+    if raw: return extract_and_clean_json(raw)
+    
+    print("❌ All AI providers failed")
     return None
 
 # ==========================================
-# 9. MASTER AI ROUTER
-# ==========================================
-def generate_questions(text, section):
-    prompt = build_afo_prompt(text, section)
-    raw = None
-    # Primary: NVIDIA multi-model
-    raw = call_nvidia(prompt)
-    if not raw:
-        # Secondary: OpenRouter multi-model
-        raw = call_openrouter(prompt)
-    if not raw:
-        # Final: Gemini multi-model
-        raw = call_gemini(prompt)
-    if not raw:
-        print("❌ All AI providers failed")
-        return None
-    print("🧠 AI Response received")
-    return extract_csv_from_response(raw)
-
-# ==========================================
-# 10. MAIN WORKFLOW (Optimized)
+# 8. MAIN WORKFLOW (RAM SAFE)
 # ==========================================
 def main_workflow():
     pdf_path = "book.pdf"
     if not os.path.exists(pdf_path):
         print("📥 Downloading PDF...")
-        gdown.download(f"https://drive.google.com/uc?id={DRIVE_FILE_ID}", pdf_path, quiet=False)
-    print("✅ PDF ready")
-
-    reader = pypdf.PdfReader(pdf_path)
-    total_pages = len(reader.pages)
-    print(f"📄 Total pages: {total_pages}")
-
+        gdown.download(f"[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){DRIVE_FILE_ID}", pdf_path, quiet=False)
+    
+    # Get total pages once
+    doc = fitz.open(pdf_path)
+    total_pages = doc.page_count
+    doc.close()
+    
     curr_page = init_tracker_and_sheet()
 
     while curr_page < total_pages:
         try:
             next_page = min(curr_page + 2, total_pages)
             section = get_section(curr_page)
-            print(f"\n📖 Pages {curr_page+1}-{next_page} | {section}")
+            print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
 
+            # Open document strictly inside the loop to save RAM
+            doc = fitz.open(pdf_path)
             text = ""
             for i in range(curr_page, next_page):
-                extracted = extract_text_with_ocr(reader, pdf_path, i)
-                if extracted:
-                    text += extracted + "\n"
+                extracted = extract_text_with_ocr(doc, pdf_path, i)
+                if extracted: text += extracted + "\n"
+            doc.close()
+            del doc
+            gc.collect()
 
             if len(text.strip()) < 50:
-                print("⚠️ Skipping blank/unreadable chunk")
+                print("⚠️ Skipping blank chunk")
+                update_tracker(next_page)
                 curr_page = next_page
-                update_tracker(curr_page)
                 continue
 
             questions = generate_questions(text, section)
-            if questions and isinstance(questions, list) and len(questions) > 0:
+
+            if questions and len(questions) > 0:
                 rows = []
                 for q in questions:
                     rows.append([
-                        q.get("section", section),
-                        q.get("question", ""),
-                        q.get("opt1", ""), q.get("opt2", ""), q.get("opt3", ""),
-                        q.get("opt4", ""), q.get("opt5", ""),
-                        q.get("answer", ""), q.get("explanation", "")
+                        q["section"], q["question"], 
+                        q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
+                        q["answer"], q["explanation"]
                     ])
                 sheet.append_rows(rows, value_input_option="RAW")
                 print(f"✅ Added {len(rows)} MCQs to Sheet")
-            else:
-                print("⚠️ No valid MCQs generated")
-
+            
+            update_tracker(next_page)
             curr_page = next_page
-            update_tracker(curr_page)
-            print(f"⏳ Progress: {curr_page}/{total_pages} pages. Cooling 20s...")
             time.sleep(20)
+
         except Exception as e:
             print(f"❌ Loop error: {e}")
-            import traceback
-            traceback.print_exc()
             time.sleep(60)
         finally:
             gc.collect()
-    print("🏁 Processing complete!")
 
 # ==========================================
-# 11. FLASK SERVER
+# 9. FLASK SERVER
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Agri-Bot AFO Engine is LIVE (NVIDIA → OpenRouter → Gemini, multi-model)"
+    return "AGTA 2026 Engine LIVE!"
 
-@app.route('/status')
-def status():
-    try:
-        t = tracker_col.find_one({"_id": "pdf_tracker"})
-        page = t.get("current_page", 0) if t else 0
-        return {"status": "running", "current_page": page + 1}
-    except:
-        return {"status": "error"}
-
-def run_server():
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, threaded=True)
-
-# ==========================================
-# 12. MAIN ENTRY
-# ==========================================
 if __name__ == "__main__":
-    print("🚀 Starting AFO MCQ Generator Engine (Multi-Model Fallback)")
+    print("🚀 Starting Agri AI Engine")
     Thread(target=main_workflow, daemon=True).start()
-    run_server()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), threaded=True)
