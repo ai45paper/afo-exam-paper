@@ -22,7 +22,10 @@ google-auth-oauthlib==1.2.0
 googleapis-common-protos==1.63.2
 
 beautifulsoup4==4.12.3
-certifi
-charset-normalizer
-idna
-rsa
+certifi==2025.1.31
+charset-normalizer==3.4.1
+idna==3.10
+rsa==4.9
+
+# Added missing package for Gemini
+google-generativeai==0.8.4
