@@ -15,10 +15,12 @@ from threading import Thread
 from pdf2image import convert_from_path
 import pytesseract
 import google.generativeai as genai
+import anthropic
 
 # ==========================================
 # 1. ENVIRONMENT VARIABLES
 # ==========================================
+CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 NVIDIA_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEYS", "").split(",") if k.strip()]
 GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()]
@@ -62,7 +64,6 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 # 3. TRACKER & SHEET LOGIC (Safe Reset)
 # ==========================================
 def init_tracker_and_sheet():
-    # v6 will wipe the Hindi sheet cleanly and start from page 1 again
     reset_flag = tracker_col.find_one({"_id": "sheet_init_v6"})
     
     if not reset_flag:
@@ -221,8 +222,33 @@ def extract_and_clean_json(raw_text):
         return None
 
 # ==========================================
-# 7. AI FALLBACK ENGINE
+# 7. AI FALLBACK ENGINE (CLAUDE FIRST!)
 # ==========================================
+def call_claude(prompt):
+    """Call Claude API with proper error handling"""
+    if not CLAUDE_KEY:
+        print("⚠️ Claude API Key not found")
+        return None
+    
+    try:
+        print("🤖 Claude Model: claude-opus-4-20250805")
+        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+        response = client.messages.create(
+            model="claude-opus-4-20250805",
+            max_tokens=2500,
+            temperature=0.4,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+        return response.content[0].text
+    except Exception as e:
+        print(f"⚠️ Claude Error: {e}")
+        return None
+
 def call_openrouter(prompt):
     models = [
         "openrouter/auto",
@@ -230,7 +256,7 @@ def call_openrouter(prompt):
         "anthropic/claude-3.5-sonnet",
         "mistralai/mixtral-8x7b-instruct"
     ]
-    url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     for model in models:
         for key in OPENROUTER_KEYS:
             try:
@@ -252,7 +278,7 @@ def call_openrouter(prompt):
     return None
 
 def call_nvidia(prompt):
-    url = "[https://integrate.api.nvidia.com/v1/chat/completions](https://integrate.api.nvidia.com/v1/chat/completions)"
+    url = "https://integrate.api.nvidia.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
     models = [
         "meta/llama3-70b-instruct",
@@ -309,28 +335,49 @@ def call_gemini(prompt):
     return None
 
 def generate_questions(text, section):
+    """Generate questions with Claude as primary provider"""
     prompt = build_afo_prompt(text, section)
     
+    # ✅ TRY CLAUDE FIRST (SAHI MODEL)
+    raw = call_claude(prompt)
+    if raw:
+        cleaned = extract_and_clean_json(raw)
+        if cleaned:
+            print(f"✅ Claude generated {len(cleaned)} questions")
+            return cleaned
+    
+    print("⚠️ Claude failed → waiting before OpenRouter")
+    time.sleep(5)
+    
+    # Fallback to OpenRouter
     raw = call_openrouter(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
-        if cleaned: return cleaned
+        if cleaned:
+            print(f"✅ OpenRouter generated {len(cleaned)} questions")
+            return cleaned
         
-    print("⚠️ OpenRouter failed → waiting before next provider")
+    print("⚠️ OpenRouter failed → waiting before NVIDIA")
     time.sleep(10)
     
+    # Fallback to NVIDIA
     raw = call_nvidia(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
-        if cleaned: return cleaned
+        if cleaned:
+            print(f"✅ NVIDIA generated {len(cleaned)} questions")
+            return cleaned
         
     print("⚠️ NVIDIA failed → waiting before Gemini")
     time.sleep(10)
     
+    # Last resort: Gemini
     raw = call_gemini(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
-        if cleaned: return cleaned
+        if cleaned:
+            print(f"✅ Gemini generated {len(cleaned)} questions")
+            return cleaned
         
     print("❌ All AI providers failed")
     return None
@@ -345,13 +392,12 @@ def main_workflow():
     if not os.path.exists(pdf_path):
         print("📥 Downloading PDF...")
         try:
-            # DIRECT ID METHOD: No URL formatting needed
             gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
             print("✅ PDF Downloaded Successfully!")
         except Exception as e:
             print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
-            return  # Stop engine if PDF is not available
-    
+            return
+
     # 2. PDF Open Step with Try/Except Safety
     try:
         doc = fitz.open(pdf_path)
@@ -427,6 +473,6 @@ def home():
     return "AGTA 2026 Engine LIVE!"
 
 if __name__ == "__main__":
-    print("🚀 Starting Agri AI Engine")
+    print("🚀 Starting Agri AI Engine with Claude")
     Thread(target=main_workflow, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), threaded=True)
