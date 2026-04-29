@@ -1,7 +1,8 @@
 Flask==3.1.3
 gunicorn==23.0.0
 
-pypdf==5.1.0
+# ❌ pypdf को हटाकर PyMuPDF लगा दिया गया है
+PyMuPDF==1.24.2 
 pdf2image==1.17.0
 pytesseract==0.3.10
 Pillow==10.4.0
@@ -27,5 +28,4 @@ charset-normalizer==3.4.1
 idna==3.10
 rsa==4.9
 
-# Added missing package for Gemini
 google-generativeai==0.8.4
