@@ -17,7 +17,7 @@ import pytesseract
 from PIL import Image
 
 # ==========================================
-# 1. ENVIRONMENT VARIABLES (with validation)
+# 1. ENVIRONMENT VARIABLES
 # ==========================================
 NVIDIA_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEYS", "").split(",") if k.strip()]
@@ -28,7 +28,6 @@ SHEET_ID = os.getenv("SHEET_ID", "").strip()
 DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "").strip()
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
 
-# Validate required variables
 if not MONGO_URI or not SHEET_ID or not DRIVE_FILE_ID or not SERVICE_ACCOUNT_JSON:
     print("❌ Missing required environment variables. Exiting.")
     sys.exit(1)
@@ -45,7 +44,7 @@ SECTION_RANGES = [
 ]
 
 # ==========================================
-# 2. DATABASE & GOOGLE SHEETS CONNECTION
+# 2. DATABASE & SHEETS CONNECTION
 # ==========================================
 print("🔄 Connecting to MongoDB...")
 mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
@@ -60,24 +59,26 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ==========================================
-# 3. TRACKER & SHEET LOGIC
+# 3. TRACKER - ALWAYS START FROM PAGE 1
 # ==========================================
 def init_tracker_and_sheet():
     try:
-        tracker = tracker_col.find_one({"_id": "pdf_tracker"})
-        if not tracker:
-            print("⚠️ First Time Run Detected! Clearing Sheet & Setting Page 2...")
+        print("🔁 Reset Mode: Starting from Page 1 (Index 0)")
+        # Force reset to page 1
+        tracker_col.update_one(
+            {"_id": "pdf_tracker"},
+            {"$set": {"current_page": 0}},
+            upsert=True
+        )
+        # Clear sheet and add headers only first time
+        if tracker_col.find_one({"_id": "pdf_tracker_reset_done"}) is None:
             sheet.clear()
             headers = ["Section", "Question", "Option 1", "Option 2", "Option 3", "Option 4", "Option 5", "Answer", "Explanation"]
             sheet.append_row(headers)
-            tracker_col.insert_one({"_id": "pdf_tracker", "current_page": 1, "has_cleared_sheet": True})
-            return 1
-        else:
-            p = tracker.get("current_page", 1)
-            print(f"✅ Restarting safely from Page {p+1} (Index {p}).")
-            return p
+            tracker_col.insert_one({"_id": "pdf_tracker_reset_done", "done": True})
+        return 0
     except Exception as e:
-        print(f"❌ Error in init_tracker_and_sheet: {e}")
+        print(f"❌ Error in tracker reset: {e}")
         sys.exit(1)
 
 def update_tracker(page_num):
@@ -91,7 +92,7 @@ def get_section(p_idx):
     return "General Agriculture"
 
 # ==========================================
-# 4. OCR TEXT EXTRACTION
+# 4. OCR EXTRACTION
 # ==========================================
 def extract_text_with_ocr(reader, pdf_path, page_index):
     text = reader.pages[page_index].extract_text()
@@ -105,7 +106,7 @@ def extract_text_with_ocr(reader, pdf_path, page_index):
             first_page=page_index + 1,
             last_page=page_index + 1,
             dpi=300,
-            poppler_path="/usr/bin"  # for Render / Linux
+            poppler_path="/usr/bin"
         )
         ocr_text = ""
         for img in images:
@@ -117,7 +118,7 @@ def extract_text_with_ocr(reader, pdf_path, page_index):
         return ""
 
 # ==========================================
-# 5. AI PROMPT & JSON PARSING
+# 5. AI PROMPT & JSON
 # ==========================================
 def build_afo_prompt(text, section):
     return f"""
@@ -127,37 +128,36 @@ for competitive exams such as IBPS AFO Mains and UPSSSC AGTA.
 TASK: Read the text carefully and generate high-quality professional MCQ questions.
 
 STRICT RULE: Use ONLY the information present in the provided text.
-Extract exam-oriented facts, concepts, numbers, varieties, diseases, etc.
 
 Topic / Section: {section}
 
-LANGUAGE: All questions must be written in **Professional Examiner-Level English**.
+LANGUAGE: Professional Examiner-Level English.
 
-QUESTION REQUIREMENTS:
-1. Question Length: 20–35 words.
-2. Mix Ratio: 60% Conceptual, 10% Statement-based, 30% Fact-based.
-3. Options: Exactly 5 distinct options.
-4. Explanation: 1–2 line conceptual explanation for the correct answer.
+REQUIREMENTS:
+- Question Length: 20–35 words.
+- Mix: 60% Conceptual, 10% Statement-based, 30% Fact-based.
+- Exactly 5 options.
+- Explanation: 1–2 lines.
 
-QUESTION COUNT RULE:
-- Limited info → 5–8 questions
-- Moderate info → 8–12 questions
-- Rich technical data → 12–20 questions
+QUESTION COUNT:
+- Limited info → 5–8
+- Moderate → 8–12
+- Rich data → 12–20
 
-OUTPUT FORMAT (CRITICAL): Return ONLY a valid JSON array. No markdown outside JSON.
+OUTPUT FORMAT: ONLY valid JSON array.
 
 JSON STRUCTURE:
 [
   {{
     "section": "{section}",
-    "question": "Question text here...",
-    "opt1": "Option A",
-    "opt2": "Option B",
-    "opt3": "Option C",
-    "opt4": "Option D",
-    "opt5": "Option E",
-    "answer": "Exact text of the correct option",
-    "explanation": "Short conceptual explanation."
+    "question": "...",
+    "opt1": "...",
+    "opt2": "...",
+    "opt3": "...",
+    "opt4": "...",
+    "opt5": "...",
+    "answer": "...",
+    "explanation": "..."
   }}
 ]
 
@@ -173,11 +173,11 @@ def extract_json_from_response(raw_text):
         else:
             return json.loads(raw_text)
     except Exception as e:
-        print(f"⚠️ JSON Parsing failed. Error: {e}")
+        print(f"⚠️ JSON Parsing failed: {e}")
         return None
 
 # ==========================================
-# 6. API ROTATION LOGIC
+# 6. API ROTATION
 # ==========================================
 def call_nvidia(prompt):
     print("🧠 Using Primary Brain: NVIDIA (Nemotron-70B)...")
@@ -195,17 +195,14 @@ def call_nvidia(prompt):
 def call_openrouter(prompt):
     for key in OPENROUTER_KEYS:
         try:
-            print(f"🔄 Using Secondary Brain: OpenRouter (Key: {key[:5]}...)")
+            print(f"🔄 Using OpenRouter (Key: {key[:5]}...)")
             url = "https://openrouter.ai/api/v1/chat/completions"
             headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-            payload = {
-                "model": "meta-llama/llama-3.1-70b-instruct",
-                "messages": [{"role": "user", "content": prompt}]
-            }
+            payload = {"model": "meta-llama/llama-3.1-70b-instruct", "messages": [{"role": "user", "content": prompt}]}
             r = requests.post(url, headers=headers, json=payload, timeout=50)
             if r.status_code == 200:
                 return r.json()['choices'][0]['message']['content']
-        except Exception:
+        except:
             continue
     raise Exception("All OpenRouter keys failed.")
 
@@ -213,13 +210,13 @@ def call_gemini(prompt):
     for key in GEMINI_KEYS:
         for model in ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"]:
             try:
-                print(f"⚔️ Using Army Backup: Gemini ({model})")
+                print(f"⚔️ Using Gemini ({model})")
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
                 payload = {"contents": [{"parts": [{"text": prompt}]}]}
                 r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=50)
                 if r.status_code == 200:
                     return r.json()['candidates'][0]['content']['parts'][0]['text']
-            except Exception:
+            except:
                 continue
     raise Exception("All Gemini keys failed.")
 
@@ -237,7 +234,7 @@ def generate_questions(text, section):
             try:
                 raw_response = call_gemini(prompt)
             except Exception as e3:
-                print(f"❌ Critical: All AI Providers failed. Error: {e3}")
+                print(f"❌ All AI providers failed: {e3}")
                 return None
     if raw_response:
         print("🧠 AI Response Received")
@@ -245,7 +242,7 @@ def generate_questions(text, section):
     return None
 
 # ==========================================
-# 7. MASTER WORKFLOW (RAM OPTIMIZED)
+# 7. MAIN WORKFLOW (OPTIMIZED)
 # ==========================================
 def main_workflow():
     pdf_path = "book.pdf"
@@ -254,39 +251,38 @@ def main_workflow():
         gdown.download(f"https://drive.google.com/uc?id={DRIVE_FILE_ID}", pdf_path, quiet=False)
         print("✅ PDF download completed.")
     else:
-        print("✅ PDF already exists. Skipping download.")
+        print("✅ PDF already exists.")
 
     print("\n🚀 Starting PDF Processing Engine...")
     sys.stdout.flush()
 
-    while True:
+    # Load PdfReader once (optimization)
+    reader = pypdf.PdfReader(pdf_path)
+    total_pages = len(reader.pages)
+    print(f"📄 Total pages in PDF: {total_pages}")
+
+    # Force start from page 1 (index 0)
+    curr_page = init_tracker_and_sheet()
+
+    while curr_page < total_pages:
         try:
-            curr_page = init_tracker_and_sheet()
-            next_page = curr_page + 2
+            next_page = min(curr_page + 2, total_pages)
             section = get_section(curr_page)
 
             print(f"\n📖 Scanning Pages: {curr_page+1} to {next_page} | Topic: {section}")
             sys.stdout.flush()
 
-            reader = pypdf.PdfReader(pdf_path)
-            total_pages = len(reader.pages)
-
-            if curr_page >= total_pages:
-                print("🏁 Book completely processed!")
-                break
-
+            # Extract text from current chunk
             text = ""
-            for i in range(curr_page, min(next_page, total_pages)):
+            for i in range(curr_page, next_page):
                 extracted = extract_text_with_ocr(reader, pdf_path, i)
                 if extracted:
                     text += extracted + "\n"
 
-            del reader
-            gc.collect()
-
             if not text or len(text.strip()) < 50:
-                print("⚠️ Page is completely blank or unreadable. Skipping chunk.")
-                update_tracker(next_page)
+                print("⚠️ Page is blank or unreadable. Skipping chunk.")
+                curr_page = next_page
+                update_tracker(curr_page)
                 continue
 
             questions = generate_questions(text, section)
@@ -301,25 +297,27 @@ def main_workflow():
                         q.get("answer", ""), q.get("explanation", "")
                     ])
                 sheet.append_rows(rows_to_insert, value_input_option="RAW")
-                print(f"✅ Success: Appended {len(rows_to_insert)} questions to Sheet.")
-                update_tracker(next_page)
+                print(f"✅ Appended {len(rows_to_insert)} questions to Sheet.")
             else:
-                print("⚠️ AI generated invalid format or empty list. Skipping chunk.")
-                update_tracker(next_page)
+                print("⚠️ AI gave invalid format. Skipping chunk.")
 
-            print("⏳ Cooldown for 20 seconds...")
+            curr_page = next_page
+            update_tracker(curr_page)
+            print(f"⏳ Progress: {curr_page}/{total_pages} pages done. Cooling 20 sec...")
             time.sleep(20)
 
         except Exception as e:
-            print(f"❌ Main Loop Exception: {e}")
+            print(f"❌ Loop error: {e}")
             import traceback
             traceback.print_exc()
             time.sleep(60)
         finally:
             gc.collect()
 
+    print("🏁 Book completely processed!")
+
 # ==========================================
-# 8. FLASK SERVER (KEEP ALIVE)
+# 8. FLASK SERVER
 # ==========================================
 app = Flask(__name__)
 
@@ -331,7 +329,7 @@ def home():
 def status():
     try:
         tracker = tracker_col.find_one({"_id": "pdf_tracker"})
-        current_page = tracker.get("current_page", 1) if tracker else 1
+        current_page = tracker.get("current_page", 0) if tracker else 0
         return {"status": "running", "current_page": current_page + 1}
     except:
         return {"status": "error"}
@@ -341,12 +339,10 @@ def run_server():
     app.run(host='0.0.0.0', port=port, threaded=True)
 
 # ==========================================
-# 9. MAIN ENTRY POINT
+# 9. MAIN
 # ==========================================
 if __name__ == "__main__":
     print("🚀 Starting Agri AI Engine")
-    # Start background workflow
     workflow_thread = Thread(target=main_workflow, daemon=True)
     workflow_thread.start()
-    # Start Flask server (blocking)
     run_server()
