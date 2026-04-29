@@ -336,22 +336,34 @@ def generate_questions(text, section):
     return None
 
 # ==========================================
-# 8. MAIN WORKFLOW (Batching & RAM Safety)
+# 8. MAIN WORKFLOW (Crash-Proof & Batching)
 # ==========================================
 def main_workflow():
     pdf_path = "book.pdf"
+    
+    # 1. Download Step with Try/Except Safety
     if not os.path.exists(pdf_path):
         print("📥 Downloading PDF...")
-        base_url = "[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=)"
-        gdown.download(base_url + DRIVE_FILE_ID, pdf_path, quiet=False)
+        try:
+            # DIRECT ID METHOD: No URL formatting needed
+            gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
+            print("✅ PDF Downloaded Successfully!")
+        except Exception as e:
+            print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
+            return  # Stop engine if PDF is not available
     
-    # Open document once, keep it open for loop
-    doc = fitz.open(pdf_path)
-    total_pages = doc.page_count
-    
+    # 2. PDF Open Step with Try/Except Safety
+    try:
+        doc = fitz.open(pdf_path)
+        total_pages = doc.page_count
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
+        return
+
     curr_page = init_tracker_and_sheet()
     buffer = []
 
+    # 3. Main Processing Loop
     while curr_page < total_pages:
         try:
             next_page = min(curr_page + 2, total_pages)
@@ -379,7 +391,7 @@ def main_workflow():
                         q["answer"], q["explanation"]
                     ])
                 
-                # Batch Buffer Logic
+                # Batch Buffer Logic (Append every 50 questions)
                 if len(buffer) >= 50:
                     sheet.append_rows(buffer, value_input_option="RAW")
                     print(f"✅ Batch Appended {len(buffer)} MCQs to Sheet")
