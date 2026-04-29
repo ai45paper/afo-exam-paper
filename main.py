@@ -318,7 +318,7 @@ def main_workflow():
     pdf_path = "book.pdf"
     if not os.path.exists(pdf_path):
         print("📥 Downloading PDF...")
-        gdown.download(f"[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){DRIVE_FILE_ID}", pdf_path, quiet=False)
+        gdown.download(f"https://drive.google.com/uc?id={DRIVE_FILE_ID}", pdf_path, quiet=False)
     
     doc = fitz.open(pdf_path)
     total_pages = doc.page_count
