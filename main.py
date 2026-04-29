@@ -62,8 +62,8 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 # 3. TRACKER & SHEET LOGIC (Wipe & Restart)
 # ==========================================
 def init_tracker_and_sheet():
-    # v4 will wipe the sheet cleanly and start from page 1 again
-    reset_flag = tracker_col.find_one({"_id": "sheet_init_v4"})
+    # v5 will wipe the sheet cleanly and start from page 1 again
+    reset_flag = tracker_col.find_one({"_id": "sheet_init_v5"})
     
     if not reset_flag:
         print("🔁 CLEAN START: Wiping Google Sheet and resetting to Page 1...")
@@ -71,7 +71,7 @@ def init_tracker_and_sheet():
         headers = ["Topic", "Question", "Option A", "Option B", "Option C", "Option D", "Option E", "Answer", "Explanation"]
         sheet.append_row(headers)
         
-        tracker_col.update_one({"_id": "sheet_init_v4"}, {"$set": {"done": True}}, upsert=True)
+        tracker_col.update_one({"_id": "sheet_init_v5"}, {"$set": {"done": True}}, upsert=True)
         tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": 0}}, upsert=True)
         return 0
     else:
@@ -112,7 +112,7 @@ def extract_text_with_ocr(doc, pdf_path, page_index):
         return ""
 
 # ==========================================
-# 5. PROFESSIONAL PROMPT (Strong Pattern Training)
+# 5. PROFESSIONAL PROMPT
 # ==========================================
 def build_afo_prompt(text, section):
     examples = """
@@ -180,9 +180,11 @@ Content:
 """
 
 # ==========================================
-# 6. JSON PARSER (Enforcing Max 10 MCQs)
+# 6. JSON PARSER
 # ==========================================
 def extract_and_clean_json(raw_text):
+    if not raw_text:
+        return None
     try:
         match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
         if match:
@@ -211,13 +213,13 @@ def extract_and_clean_json(raw_text):
         return None
 
 # ==========================================
-# 7. AI FALLBACK ENGINE (Updated Models & Sleeps)
+# 7. AI FALLBACK ENGINE (Corrected Models)
 # ==========================================
 def call_openrouter(prompt):
     models = [
-        "openrouter/auto",
+        "meta-llama/llama-3.1-70b-instruct",
         "mistralai/mixtral-8x7b-instruct",
-        "meta-llama/llama-3-70b-instruct"
+        "openrouter/auto"
     ]
     url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
     for key in OPENROUTER_KEYS:
@@ -243,8 +245,8 @@ def call_nvidia(prompt):
     url = "[https://integrate.api.nvidia.com/v1/chat/completions](https://integrate.api.nvidia.com/v1/chat/completions)"
     headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
     models = [
-        "meta/llama3-70b-instruct",
-        "nvidia/nemotron-4-340b-instruct"
+        "nvidia/llama-3.1-nemotron-70b-instruct",
+        "meta/llama-3.1-70b-instruct"
     ]
     for model in models:
         try:
@@ -265,9 +267,6 @@ def call_nvidia(prompt):
 
 def call_gemini(prompt):
     models = [
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.0-pro",
         "gemini-2.0-flash",
         "gemini-1.5-pro",
         "gemini-1.5-flash"
@@ -296,34 +295,33 @@ def generate_questions(text, section):
     prompt = build_afo_prompt(text, section)
     
     raw = call_openrouter(prompt)
-    if raw:
-        return extract_and_clean_json(raw)
+    cleaned = extract_and_clean_json(raw)
+    if cleaned: return cleaned
         
     print("⚠️ OpenRouter failed → waiting before next provider")
     time.sleep(10)
     
     raw = call_nvidia(prompt)
-    if raw:
-        return extract_and_clean_json(raw)
+    cleaned = extract_and_clean_json(raw)
+    if cleaned: return cleaned
         
     print("⚠️ NVIDIA failed → waiting before Gemini")
     time.sleep(10)
     
     raw = call_gemini(prompt)
-    if raw:
-        return extract_and_clean_json(raw)
+    cleaned = extract_and_clean_json(raw)
+    if cleaned: return cleaned
         
     print("❌ All AI providers failed")
     return None
 
 # ==========================================
-# 8. MAIN WORKFLOW (RAM Optimization Updated)
+# 8. MAIN WORKFLOW
 # ==========================================
 def main_workflow():
     pdf_path = "book.pdf"
     if not os.path.exists(pdf_path):
         print("📥 Downloading PDF...")
-        # Note: Clear URL without markdown brackets
         gdown.download(f"[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){DRIVE_FILE_ID}", pdf_path, quiet=False)
     
     doc = fitz.open(pdf_path)
@@ -375,7 +373,6 @@ def main_workflow():
             print(f"❌ Loop error: {e}")
             time.sleep(60)
         finally:
-            # RAM Optimization Rule #9
             text = None
             questions = None
             gc.collect()
