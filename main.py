@@ -59,19 +59,19 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ==========================================
-# 3. TRACKER & SHEET LOGIC (Headers Updated)
+# 3. TRACKER & SHEET LOGIC (Wipe & Restart)
 # ==========================================
 def init_tracker_and_sheet():
-    reset_flag = tracker_col.find_one({"_id": "sheet_init_v3"})
+    # v4 will wipe the sheet cleanly and start from page 1 again
+    reset_flag = tracker_col.find_one({"_id": "sheet_init_v4"})
     
     if not reset_flag:
         print("🔁 CLEAN START: Wiping Google Sheet and resetting to Page 1...")
         sheet.clear()
-        # Header updated as per rule 8
         headers = ["Topic", "Question", "Option A", "Option B", "Option C", "Option D", "Option E", "Answer", "Explanation"]
         sheet.append_row(headers)
         
-        tracker_col.update_one({"_id": "sheet_init_v3"}, {"$set": {"done": True}}, upsert=True)
+        tracker_col.update_one({"_id": "sheet_init_v4"}, {"$set": {"done": True}}, upsert=True)
         tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": 0}}, upsert=True)
         return 0
     else:
@@ -112,25 +112,29 @@ def extract_text_with_ocr(doc, pdf_path, page_index):
         return ""
 
 # ==========================================
-# 5. PROFESSIONAL PROMPT (Pattern Training Updated)
+# 5. PROFESSIONAL PROMPT (Strong Pattern Training)
 # ==========================================
 def build_afo_prompt(text, section):
     examples = """
 REFERENCE QUESTION STYLE (Follow exactly):
 
-The excretory organ of silkworm located at junction of midgut and hindgut is
+The excretory organ of silkworm which is located at the junction of the midgut and hindgut is known as
 Options: Proboscis | Malpighian tubule | Nephridia | Green glands | None
 Answer: Malpighian tubule
 
-Ufra disease in rice is caused by
-Options: Bacteria | Nematode | Virus | Fungus | None
-Answer: Nematode
+Type of silviculture system which can regenerate through seeds and where the majority have a long life is
+Options: Pollarding | High forest | Coppicing | Forking | None
+Answer: High forest
 
-Sand percentage in sandy soil is approximately
-Options: 40% | 60% | 80% | 20% | 45%
-Answer: 80%
+The term used to define the variation derived from any form of the cell or tissue culture is known as
+Options: Genetic Engineering | Somaclonal variation | Genetic Variation | Environmental Variation | None
+Answer: Somaclonal variation
 
-Degreening in citrus fruits refers to
+A destructive polyhedrosis disease of silkworm that is related to wilt and is marked by spotty yellowing of the skin and internal liquefaction also called jaundice is
+Options: Pebrine | Grasseries | Flacherie | Aspergillosis | None
+Answer: Grasseries
+
+The process of removing the green colouring (known as chlorophyll) from the skin of citrus fruit by introducing measured amounts of ethylene gas is known as
 Options: Ripening | Degreening | Physiological maturity | Denavelling | Dehusking
 Answer: Degreening
 
@@ -142,13 +146,14 @@ Avoid repeating same question pattern.
 You are Satyam Sir, an expert agriculture mentor setting a mock paper for the AGTA 2026 and IBPS AFO Mains batches.
 
 Your task: Generate high-quality, MODERATE LEVEL multiple-choice questions from the given agricultural content.
-Language: Bilingual (Hindi as base, Technical terms in English).
 
 STRICT RULES:
-1. Moderate Difficulty: Focus on key terms and clear processes.
-2. Structure: 20-35 words per question. Exactly 5 options per question.
-3. Formatting: Do NOT output prefixes like "Option A:" or "1)". Provide plain text.
-4. Output Limit: Maximum 10 questions per chunk.
+1. Language: STRICTLY ENGLISH ONLY. Do not use Hindi or any other language.
+2. Question Length: Each question MUST be strictly between 20 to 35 words. Count the words carefully.
+3. Moderate Difficulty: Focus on key terms, clear processes, and important facts.
+4. Structure: Exactly 5 options per question.
+5. Formatting: Do NOT output prefixes like "Option A:" or "1)". Provide plain text.
+6. Output Limit: Maximum 10 questions per chunk.
 
 Topic: {section}
 
@@ -159,14 +164,14 @@ You MUST return ONLY a RAW JSON ARRAY. No markdown block formatting (do not use 
 [
   {{
     "section": "{section}",
-    "question": "Question text here (Bilingual)...",
+    "question": "Question text here strictly in English (20-35 words)...",
     "opt1": "First option text",
     "opt2": "Second option text",
     "opt3": "Third option text",
     "opt4": "Fourth option text",
     "opt5": "Fifth option text",
     "answer": "Exact text of the correct option",
-    "explanation": "Short conceptual explanation (20 words max)."
+    "explanation": "Short conceptual explanation in English (20 words max)."
   }}
 ]
 
@@ -318,7 +323,8 @@ def main_workflow():
     pdf_path = "book.pdf"
     if not os.path.exists(pdf_path):
         print("📥 Downloading PDF...")
-        gdown.download(f"https://drive.google.com/uc?id={DRIVE_FILE_ID}", pdf_path, quiet=False)
+        # Note: Clear URL without markdown brackets
+        gdown.download(f"[https://drive.google.com/uc?id=](https://drive.google.com/uc?id=){DRIVE_FILE_ID}", pdf_path, quiet=False)
     
     doc = fitz.open(pdf_path)
     total_pages = doc.page_count
@@ -369,7 +375,7 @@ def main_workflow():
             print(f"❌ Loop error: {e}")
             time.sleep(60)
         finally:
-            # RAM Optimization Rule #9 Added here
+            # RAM Optimization Rule #9
             text = None
             questions = None
             gc.collect()
