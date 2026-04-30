@@ -224,15 +224,18 @@ def extract_and_clean_json(raw_text):
 # ==========================================
 # 7. AI FALLBACK ENGINE (CLAUDE FIRST!)
 # ==========================================
+
 def call_claude(prompt):
-    """Call Claude API with proper error handling"""
+    """Call Claude API - FIXED VERSION without proxies parameter"""
     if not CLAUDE_KEY:
         print("⚠️ Claude API Key not found")
         return None
     
     try:
         print("🤖 Claude Model: claude-opus-4-20250805")
+        # Initialize client without proxies parameter (not supported in SDK 0.28.0)
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+        
         response = client.messages.create(
             model="claude-opus-4-20250805",
             max_tokens=2500,
@@ -250,6 +253,7 @@ def call_claude(prompt):
         return None
 
 def call_openrouter(prompt):
+    """OpenRouter with best models for MCQ generation"""
     models = [
         "openrouter/auto",
         "meta-llama/llama-3.1-70b-instruct",
@@ -257,33 +261,62 @@ def call_openrouter(prompt):
         "mistralai/mixtral-8x7b-instruct"
     ]
     url = "https://openrouter.ai/api/v1/chat/completions"
+    
     for model in models:
         for key in OPENROUTER_KEYS:
+            if not key:
+                continue
+                
             try:
                 print(f"🔄 OpenRouter Model: {model}")
-                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+                headers = {
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://afo-exam-paper.onrender.com",
+                    "X-Title": "AFO Exam Paper Generator"
+                }
                 payload = {
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.4,
-                    "max_tokens": 2500
+                    "max_tokens": 2500,
+                    "top_p": 0.95
                 }
                 r = requests.post(url, headers=headers, json=payload, timeout=60)
+                
                 if r.status_code == 200:
-                    return r.json()["choices"][0]["message"]["content"]
-                time.sleep(5)
+                    result = r.json()
+                    if result.get("choices") and len(result["choices"]) > 0:
+                        return result["choices"][0]["message"]["content"]
+                elif r.status_code == 429:
+                    print(f"⚠️ OpenRouter Rate Limited: {model}")
+                    time.sleep(10)
+                else:
+                    print(f"⚠️ OpenRouter HTTP {r.status_code}: {model}")
+                    
             except Exception as e:
-                print(f"⚠️ OpenRouter Error ({model}): {e}")
+                print(f"⚠️ OpenRouter Error ({model}): {str(e)[:100]}")
+                time.sleep(5)
                 continue
+    
     return None
 
 def call_nvidia(prompt):
+    """NVIDIA API for question generation"""
+    if not NVIDIA_KEY:
+        print("⚠️ NVIDIA API Key not found")
+        return None
+        
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {NVIDIA_KEY}",
+        "Content-Type": "application/json"
+    }
     models = [
         "meta/llama3-70b-instruct",
         "nvidia/nemotron-4-340b-instruct"
     ]
+    
     for model in models:
         try:
             print(f"🧠 NVIDIA Model: {model}")
@@ -291,97 +324,138 @@ def call_nvidia(prompt):
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.35,
-                "max_tokens": 2500
+                "max_tokens": 2500,
+                "top_p": 0.95
             }
             r = requests.post(url, headers=headers, json=payload, timeout=60)
+            
             if r.status_code == 200:
-                return r.json()['choices'][0]['message']['content']
-            time.sleep(5)
+                result = r.json()
+                if result.get("choices") and len(result["choices"]) > 0:
+                    return result["choices"][0]["message"]["content"]
+            elif r.status_code == 429:
+                print(f"⚠️ NVIDIA Rate Limited: {model}")
+                time.sleep(10)
+            else:
+                print(f"⚠️ NVIDIA HTTP {r.status_code}: {model}")
+                
         except Exception as e:
-            print(f"⚠️ NVIDIA Error ({model}): {e}")
+            print(f"⚠️ NVIDIA Error ({model}): {str(e)[:100]}")
+            time.sleep(5)
             continue
+    
     return None
 
 def call_gemini(prompt):
+    """Gemini API with optimized models"""
+    # Only use Gemini 2.5 models (older 1.5 models are deprecated)
     models = [
-        "gemini-2.5-pro",
         "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash"
+        "gemini-2.0-flash"
     ]
+    
     for key in GEMINI_KEYS:
+        if not key:
+            continue
+            
         try:
             genai.configure(api_key=key)
+            
             for model_name in models:
                 try:
                     print(f"🤖 Gemini Model: {model_name}")
                     model = genai.GenerativeModel(model_name)
+                    
                     response = model.generate_content(
                         prompt,
                         generation_config=genai.types.GenerationConfig(
                             temperature=0.4,
+                            top_p=0.95,
+                            max_output_tokens=2500,
                             response_mime_type="application/json"
-                        )
+                        ),
+                        safety_settings=[
+                            {
+                                "category": genai.types.HarmCategory.HARM_CATEGORY_UNSPECIFIED,
+                                "threshold": genai.types.HarmBlockThreshold.BLOCK_NONE,
+                            }
+                        ]
                     )
+                    
                     if response and response.text:
                         return response.text
+                    
                     time.sleep(5)
+                    
                 except Exception as e:
-                    print(f"⚠️ Gemini Error ({model_name}): {e}")
+                    error_msg = str(e)
+                    if "429" in error_msg or "quota" in error_msg.lower():
+                        print(f"⚠️ Gemini Quota Exceeded ({model_name})")
+                    elif "404" in error_msg or "not found" in error_msg.lower():
+                        print(f"⚠️ Gemini Model Not Found ({model_name})")
+                    else:
+                        print(f"⚠️ Gemini Error ({model_name}): {error_msg[:100]}")
+                    time.sleep(5)
                     continue
+                    
         except Exception as e:
+            print(f"⚠️ Gemini Config Error: {str(e)[:100]}")
+            time.sleep(10)
             continue
+    
     return None
 
 def generate_questions(text, section):
-    """Generate questions with Claude as primary provider"""
+    """Generate questions with proper fallback chain"""
     prompt = build_afo_prompt(text, section)
     
-    # ✅ TRY CLAUDE FIRST (SAHI MODEL)
+    # 1️⃣ TRY CLAUDE FIRST (BEST QUALITY)
+    print("📍 Attempting Claude...")
     raw = call_claude(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
-        if cleaned:
+        if cleaned and len(cleaned) > 0:
             print(f"✅ Claude generated {len(cleaned)} questions")
             return cleaned
     
-    print("⚠️ Claude failed → waiting before OpenRouter")
+    print("⚠️ Claude failed → trying OpenRouter")
     time.sleep(5)
     
-    # Fallback to OpenRouter
+    # 2️⃣ FALLBACK TO OPENROUTER (RELIABLE)
+    print("📍 Attempting OpenRouter...")
     raw = call_openrouter(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
-        if cleaned:
+        if cleaned and len(cleaned) > 0:
             print(f"✅ OpenRouter generated {len(cleaned)} questions")
             return cleaned
-        
-    print("⚠️ OpenRouter failed → waiting before NVIDIA")
+    
+    print("⚠️ OpenRouter failed → trying NVIDIA")
     time.sleep(10)
     
-    # Fallback to NVIDIA
+    # 3️⃣ FALLBACK TO NVIDIA
+    print("📍 Attempting NVIDIA...")
     raw = call_nvidia(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
-        if cleaned:
+        if cleaned and len(cleaned) > 0:
             print(f"✅ NVIDIA generated {len(cleaned)} questions")
             return cleaned
-        
-    print("⚠️ NVIDIA failed → waiting before Gemini")
+    
+    print("⚠️ NVIDIA failed → trying Gemini")
     time.sleep(10)
     
-    # Last resort: Gemini
+    # 4️⃣ LAST RESORT: GEMINI
+    print("📍 Attempting Gemini...")
     raw = call_gemini(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
-        if cleaned:
+        if cleaned and len(cleaned) > 0:
             print(f"✅ Gemini generated {len(cleaned)} questions")
             return cleaned
-        
-    print("❌ All AI providers failed")
+    
+    print("❌ All AI providers failed for this batch")
     return None
-
 # ==========================================
 # 8. MAIN WORKFLOW (Crash-Proof & Batching)
 # ==========================================
