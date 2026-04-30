@@ -222,85 +222,12 @@ def extract_and_clean_json(raw_text):
         return None
 
 # ==========================================
-# 7. AI FALLBACK ENGINE (CLAUDE FIRST!)
+# 7. AI FALLBACK ENGINE (Gemini Key-Switch Fixed)
 # ==========================================
-def call_claude(prompt):
-    if not CLAUDE_KEY:
-        print("⚠️ Claude API Key not found")
-        return None
-    try:
-        print("🤖 Claude Model: claude-opus-4-20250805")
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-        response = client.messages.create(
-            model="claude-opus-4-20250805",
-            max_tokens=2500,
-            temperature=0.4,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text
-    except Exception as e:
-        print(f"⚠️ Claude Error: {e}")
-        return None
-
-def call_openrouter(prompt):
-    url = "".join(["h", "t", "t", "p", "s", "://", "openrouter.ai", "/api/v1/chat/completions"])
-    models = [
-        "openrouter/auto",
-        "meta-llama/llama-3.1-70b-instruct",
-        "anthropic/claude-3.5-sonnet",
-        "mistralai/mixtral-8x7b-instruct"
-    ]
-    for model in models:
-        for key in OPENROUTER_KEYS:
-            try:
-                print(f"🔄 OpenRouter Model: {model}")
-                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.4,
-                    "max_tokens": 2500
-                }
-                r = requests.post(url, headers=headers, json=payload, timeout=60)
-                if r.status_code == 200:
-                    return r.json()["choices"][0]["message"]["content"]
-                time.sleep(5)
-            except Exception as e:
-                print(f"⚠️ OpenRouter Error ({model}): {e}")
-                continue
-    return None
-
-def call_nvidia(prompt):
-    url = "".join(["h", "t", "t", "p", "s", "://", "integrate.api.nvidia.com", "/v1/chat/completions"])
-    headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
-    models = [
-        "meta/llama3-70b-instruct",
-        "nvidia/nemotron-4-340b-instruct"
-    ]
-    for model in models:
-        try:
-            print(f"🧠 NVIDIA Model: {model}")
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.35,
-                "max_tokens": 2500
-            }
-            r = requests.post(url, headers=headers, json=payload, timeout=60)
-            if r.status_code == 200:
-                return r.json()['choices'][0]['message']['content']
-            time.sleep(5)
-        except Exception as e:
-            print(f"⚠️ NVIDIA Error ({model}): {e}")
-            continue
-    return None
-
 def call_gemini(prompt):
-    models = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash"
-    ]
+    models = ["gemini-2.5-flash", "gemini-2.0-flash"]
     for key in GEMINI_KEYS:
+        if not key: continue
         try:
             genai.configure(api_key=key)
             for model_name in models:
@@ -319,63 +246,103 @@ def call_gemini(prompt):
                     time.sleep(5)
                 except Exception as e:
                     error_msg = str(e)
-                    # ✅ FIXED: Switch to next key on Quota Error
+                    # ✅ कोटा फुल होने पर तुरंत इस Key को छोड़कर अगली Key पर जाओ
                     if "429" in error_msg or "quota" in error_msg.lower():
-                        print(f"⚠️ Gemini Quota Exceeded ({model_name}). Switching to next Key...")
-                        break
-                    print(f"⚠️ Gemini Error ({model_name}): {e}")
+                        print(f"⚠️ Quota Full for Key. Switching to next Key...")
+                        break 
+                    print(f"⚠️ Gemini Error ({model_name}): {error_msg[:100]}")
                     continue
-        except Exception as e:
+        except Exception:
             continue
     return None
 
-def generate_questions(text, section):
-    prompt = build_afo_prompt(text, section)
-    
-    print("📍 Attempting Claude...")
-    raw = call_claude(prompt)
-    if raw:
-        cleaned = extract_and_clean_json(raw)
-        if cleaned:
-            print(f"✅ Claude generated {len(cleaned)} questions")
-            return cleaned
-    
-    print("⚠️ Claude failed → waiting before OpenRouter")
-    time.sleep(5)
-    
-    print("📍 Attempting OpenRouter...")
-    raw = call_openrouter(prompt)
-    if raw:
-        cleaned = extract_and_clean_json(raw)
-        if cleaned:
-            print(f"✅ OpenRouter generated {len(cleaned)} questions")
-            return cleaned
+# ==========================================
+# 8. MAIN WORKFLOW (Extra Memory-Safe for Render)
+# ==========================================
+def main_workflow():
+    try:
+        pdf_path = "book.pdf"
+        print("▶️ ENGINE STARTING: Checking for PDF...")
         
-    print("⚠️ OpenRouter failed → waiting before NVIDIA")
-    time.sleep(10)
-    
-    print("📍 Attempting NVIDIA...")
-    raw = call_nvidia(prompt)
-    if raw:
-        cleaned = extract_and_clean_json(raw)
-        if cleaned:
-            print(f"✅ NVIDIA generated {len(cleaned)} questions")
-            return cleaned
+        # 1. Download Step (Quiet Mode to save RAM)
+        if not os.path.exists(pdf_path):
+            print("📥 Downloading PDF (117MB)... Please wait.")
+            try:
+                # quiet=True minimizes memory usage during logging
+                gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=True)
+                print("✅ PDF Saved to Disk.")
+                gc.collect() # 🧹 Clear RAM immediately
+                time.sleep(3) # ⏳ Let system sync
+            except Exception as e:
+                print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
+                return
         
-    print("⚠️ NVIDIA failed → waiting before Gemini")
-    time.sleep(10)
-    
-    print("📍 Attempting Gemini...")
-    raw = call_gemini(prompt)
-    if raw:
-        cleaned = extract_and_clean_json(raw)
-        if cleaned:
-            print(f"✅ Gemini generated {len(cleaned)} questions")
-            return cleaned
-        
-    print("❌ All AI providers failed")
-    return None
+        # 2. PDF Index Step (Load-Only-On-Demand)
+        print("📖 Reading PDF metadata...")
+        try:
+            with fitz.open(pdf_path) as temp_doc:
+                total_pages = temp_doc.page_count
+            print(f"✅ Total Pages found: {total_pages}")
+        except Exception as e:
+            print(f"❌ CRITICAL ERROR: Could not read PDF! {e}")
+            return
 
+        curr_page = init_tracker_and_sheet()
+        buffer = []
+
+        # 3. Main Processing Loop
+        while curr_page < total_pages:
+            try:
+                next_page = min(curr_page + 2, total_pages)
+                section = get_section(curr_page)
+                print(f"\n📖 Processing Pages {curr_page+1}-{next_page} | Topic: {section}")
+
+                text = ""
+                # Open PDF only for this chunk to keep RAM free
+                with fitz.open(pdf_path) as doc:
+                    for i in range(curr_page, next_page):
+                        extracted = extract_text_with_ocr(doc, pdf_path, i)
+                        if extracted: text += extracted + "\n"
+
+                if len(text.strip()) < 50:
+                    update_tracker(next_page)
+                    curr_page = next_page
+                    continue
+
+                questions = generate_questions(text, section)
+
+                if questions:
+                    for q in questions:
+                        buffer.append([
+                            q["section"], q["question"], 
+                            q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
+                            q["answer"], q["explanation"]
+                        ])
+                    
+                    if len(buffer) >= 50:
+                        sheet.append_rows(buffer, value_input_option="RAW")
+                        print(f"✅ Saved batch of {len(buffer)} questions.")
+                        buffer = []
+                
+                update_tracker(next_page)
+                curr_page = next_page
+                gc.collect() # 🧹 Cleaning memory after every chunk
+                time.sleep(8)
+
+            except Exception as e:
+                print(f"❌ Loop error: {e}")
+                time.sleep(30)
+        
+        if buffer:
+            sheet.append_rows(buffer, value_input_option="RAW")
+            print(f"✅ Saved final batch.")
+            
+        print("🎉 ALL DONE!")
+
+    except Exception as e:
+        print(f"❌🔥 THREAD CRASHED: {e}")
+        import traceback
+        traceback.print_exc()
 # ==========================================
 # 8. MAIN WORKFLOW (Memory-Safe & Bulletproof)
 # ==========================================
