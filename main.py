@@ -270,25 +270,59 @@ def generate_questions(text, section):
     return None
 
 # ==========================================
-# 8. MAIN WORKFLOW
+# 8. MAIN WORKFLOW (Streaming Download + Memory Safe)
 # ==========================================
 def main_workflow():
     try:
         pdf_path = "book.pdf"
         print("▶️ ENGINE STARTING...")
         
+        # 1. Chunked Streaming Download (RAM Safe for Render Free Tier)
         if not os.path.exists(pdf_path):
-            print("📥 Downloading PDF (117MB)...")
-            gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=True)
-            print("✅ PDF Saved.")
-            gc.collect()
+            print("📥 Streaming PDF Download (117MB) in chunks... Please wait.")
+            try:
+                # We construct the direct download URL manually
+                download_url = "".join(["https://", "drive.google.com", "/uc?id=", DRIVE_FILE_ID, "&export=download"])
+                
+                # Use a requests session with streaming enabled
+                session = requests.Session()
+                response = session.get(download_url, stream=True)
+                
+                # If Google shows a warning page for large files, we bypass it
+                if "confirm=" not in download_url and response.text.find("confirm=") != -1:
+                    import re
+                    match = re.search(r'confirm=([a-zA-Z0-9_-]+)', response.text)
+                    if match:
+                        token = match.group(1)
+                        download_url += f"&confirm={token}"
+                        response = session.get(download_url, stream=True)
 
-        with fitz.open(pdf_path) as temp_doc:
-            total_pages = temp_doc.page_count
-        
+                # Save the file in small 1MB chunks to keep RAM totally free
+                with open(pdf_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024): 
+                        if chunk: 
+                            f.write(chunk)
+                            
+                print("✅ PDF Streaming Saved to Disk.")
+                gc.collect() # Force clear RAM
+                time.sleep(3) # Let disk I/O catch up
+            except Exception as e:
+                print(f"❌ CRITICAL ERROR: PDF Streaming Failed! {e}")
+                return
+
+        # 2. PDF Index Step
+        print("📖 Reading PDF metadata...")
+        try:
+            with fitz.open(pdf_path) as temp_doc:
+                total_pages = temp_doc.page_count
+        except Exception as e:
+            print(f"❌ CRITICAL ERROR: PyMuPDF could not read the file! {e}")
+            return
+            
         curr_page = init_tracker_and_sheet()
         buffer = []
 
+        # 3. Main Processing Loop
         while curr_page < total_pages:
             next_page = min(curr_page + 2, total_pages)
             section = get_section(curr_page)
@@ -327,6 +361,7 @@ def main_workflow():
         
         if buffer: sheet.append_rows(buffer, value_input_option="RAW")
         print("🎉 FINISHED!")
+        
     except Exception as e:
         print(f"❌ CRITICAL CRASH: {e}")
 
