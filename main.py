@@ -61,28 +61,29 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ==========================================
-# 3. TRACKER & SHEET LOGIC (Safe Reset)
+# 3. TRACKER & APPEND-ONLY LOGIC
 # ==========================================
 def init_tracker_and_sheet():
-    reset_flag = tracker_col.find_one({"_id": "sheet_init_v6"})
+    tracker = tracker_col.find_one({"_id": "pdf_tracker"})
+    page = tracker.get("current_page", 0) if tracker else 0
     
-    if not reset_flag:
-        print("🔁 CLEAN START: Wiping Google Sheet and resetting to Page 1...")
-        sheet.clear()
-        headers = ["Topic", "Question", "Option A", "Option B", "Option C", "Option D", "Option E", "Answer", "Explanation"]
-        sheet.append_row(headers)
-        
-        tracker_col.update_one({"_id": "sheet_init_v6"}, {"$set": {"done": True}}, upsert=True)
-        tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": 0}}, upsert=True)
-        return 0
+    # 🔥 MANUAL OVERRIDE: Index 969 = Page 970
+    MANUAL_START_PAGE = 969 
+    
+    if page < MANUAL_START_PAGE:
+        page = MANUAL_START_PAGE
+        update_tracker(page)
+        print(f"🚀 MANUAL OVERRIDE: Jumping directly to Page {page+1}")
     else:
-        tracker = tracker_col.find_one({"_id": "pdf_tracker"})
-        page = tracker.get("current_page", 0) if tracker else 0
-        print(f"✅ Safe Restart: Resuming from Page {page+1} (Index {page})")
-        return page
+        print(f"✅ Safe Restart: Resuming from Page {page+1} (MongoDB Tracked)")
+
+    # 🛑 SHEET DELETE FUNCTION IS REMOVED
+    print("📝 Google Sheet check complete. Existing data is SAFE. Appending new data at the bottom...")
+    
+    return page
 
 def update_tracker(page_num):
-    tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}})
+    tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_num}}, upsert=True)
 
 def get_section(p_idx):
     human_page = p_idx + 1
@@ -91,29 +92,25 @@ def get_section(p_idx):
     return "General Agriculture"
 
 # ==========================================
-# 4. FAST TEXT EXTRACTION (Optimized DPI)
+# 4. FAST TEXT EXTRACTION
 # ==========================================
 def extract_text_with_ocr(doc, pdf_path, page_index):
     page = doc.load_page(page_index)
     text = page.get_text()
-    
     if text and len(text.strip()) > 100:
         return text
-        
-    print(f"🔍 Empty Page! OCR activated for Page {page_index+1}")
+    
+    print(f"🔍 OCR activated for Page {page_index+1}")
     try:
         images = convert_from_path(pdf_path, first_page=page_index+1, last_page=page_index+1, dpi=200, poppler_path="/usr/bin")
         ocr_text = ""
         for img in images:
-            gray = img.convert("L")
-            ocr_text += pytesseract.image_to_string(gray, lang="eng", config="--oem 3 --psm 6")
+            ocr_text += pytesseract.image_to_string(img.convert("L"), lang="eng", config="--oem 3 --psm 6")
         return ocr_text
-    except Exception as e:
-        print(f"⚠️ OCR error: {e}")
-        return ""
+    except: return ""
 
 # ==========================================
-# 5. PROFESSIONAL PROMPT (STRICT ENGLISH)
+# 5. PROFESSIONAL PROMPT
 # ==========================================
 def build_afo_prompt(text, section):
     examples = """
@@ -127,49 +124,39 @@ Type of silviculture system which can regenerate through seeds and where the maj
 Options: Pollarding | High forest | Coppicing | Forking | None
 Answer: High forest
 
-The term used to define the variation derived from any form of the cell or tissue culture is known as
-Options: Genetic Engineering | Somaclonal variation | Genetic Variation | Environmental Variation | None
-Answer: Somaclonal variation
-
-A destructive polyhedrosis disease of silkworm that is related to wilt and is marked by spotty yellowing of the skin and internal liquefaction also called jaundice is
-Options: Pebrine | Grasseries | Flacherie | Aspergillosis | None
-Answer: Grasseries
-
 The process of removing the green colouring (known as chlorophyll) from the skin of citrus fruit by introducing measured amounts of ethylene gas is known as
 Options: Ripening | Degreening | Physiological maturity | Denavelling | Dehusking
 Answer: Degreening
 """
+    return f"""You are Satyam Sir, an expert agriculture mentor setting a mock paper for the AGTA 2026 and IBPS AFO Mains batches.
 
-    return f"""
-You are Satyam Sir, an expert agriculture mentor setting a mock paper for the AGTA 2026 and IBPS AFO Mains batches.
-
-Your task: Generate high-quality multiple-choice questions from the given agricultural content.
+YOUR TASK: Generate exactly 10 high-quality multiple-choice questions from the provided text.
 
 STRICT RULES:
-1. Language: STRICTLY ENGLISH ONLY. Do NOT use Hindi or any other language. All questions, options, and explanations must be entirely in English.
-2. Difficulty: Moderate level. Keep them engaging and relevant for competitive exams.
-3. Question Length: Each question MUST be strictly between 20 to 35 words. 
-4. Structure: Exactly 5 options per question.
-5. Formatting: Do NOT output prefixes like "Option A:" or "1)". Provide plain text.
-6. Output Limit: Maximum 10 questions per chunk.
+1. Language: 100% STRICTLY ENGLISH ONLY. No Hindi.
+2. Difficulty: Moderate level. Keep them engaging.
+3. Options: Exactly 5 options per question.
+4. Answer Match: The text in the 'answer' field MUST exactly match the text of one of the 5 options.
+5. Question Length: 20 to 35 words.
+6. Explanation: Max 20 words.
+7. Format: Return ONLY a raw JSON array. DO NOT use markdown code blocks (like ```json). No introductory or concluding text.
 
 Topic: {section}
 
 {examples}
 
-OUTPUT FORMAT:
-You MUST return ONLY a RAW JSON ARRAY. No markdown block formatting (do not use ```json).
+EXPECTED JSON SCHEMA:
 [
   {{
     "section": "{section}",
-    "question": "Question text here strictly in English (20-35 words)...",
+    "question": "Question text here strictly in English...",
     "opt1": "First option text",
     "opt2": "Second option text",
     "opt3": "Third option text",
     "opt4": "Fourth option text",
     "opt5": "Fifth option text",
     "answer": "Exact text of the correct option",
-    "explanation": "Short conceptual explanation strictly in English (20 words max)."
+    "explanation": "Short conceptual explanation strictly in English."
   }}
 ]
 
@@ -178,52 +165,81 @@ Content:
 """
 
 # ==========================================
-# 6. JSON PARSER (Non-Greedy & Answer Validation)
+# 6. JSON PARSER
 # ==========================================
 def extract_and_clean_json(raw_text):
-    if not raw_text:
-        return None
+    if not raw_text: return None
     try:
-        match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', raw_text)
-        if match:
-            data = json.loads(match.group(0))
-        else:
-            data = json.loads(raw_text)
-            
+        clean_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw_text.strip(), flags=re.MULTILINE).strip()
+        match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', clean_text)
+        data = json.loads(match.group(0)) if match else json.loads(clean_text)
         data = data[:10]  
         
         cleaned_data = []
         for item in data:
-            opt1 = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt1", "")), flags=re.IGNORECASE).strip()
-            opt2 = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt2", "")), flags=re.IGNORECASE).strip()
-            opt3 = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt3", "")), flags=re.IGNORECASE).strip()
-            opt4 = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt4", "")), flags=re.IGNORECASE).strip()
-            opt5 = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("opt5", "")), flags=re.IGNORECASE).strip()
-            ans = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(item.get("answer", "")), flags=re.IGNORECASE).strip()
+            def clean_opt(opt):
+                return re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', str(opt), flags=re.IGNORECASE).strip()
             
-            # Answer Validation Rule
-            if ans not in [opt1, opt2, opt3, opt4, opt5]:
-                continue
+            opt1, opt2, opt3 = clean_opt(item.get("opt1", "")), clean_opt(item.get("opt2", "")), clean_opt(item.get("opt3", ""))
+            opt4, opt5, ans = clean_opt(item.get("opt4", "")), clean_opt(item.get("opt5", "")), clean_opt(item.get("answer", ""))
+            
+            if not item.get("question") or not ans: continue
+            
+            valid_options_lower = [opt1.lower(), opt2.lower(), opt3.lower(), opt4.lower(), opt5.lower()]
+            if ans.lower() not in valid_options_lower: continue
                 
             cleaned_data.append({
                 "section": str(item.get("section", "")).strip(),
                 "question": str(item.get("question", "")).strip(),
-                "opt1": opt1,
-                "opt2": opt2,
-                "opt3": opt3,
-                "opt4": opt4,
-                "opt5": opt5,
-                "answer": ans,
-                "explanation": str(item.get("explanation", "")).strip()
+                "opt1": opt1, "opt2": opt2, "opt3": opt3, "opt4": opt4, "opt5": opt5,
+                "answer": ans, "explanation": str(item.get("explanation", "")).strip()
             })
         return cleaned_data
-    except Exception as e:
-        print(f"⚠️ JSON Parsing failed: {e}")
-        return None
+    except: return None
 
 # ==========================================
-# 7. AI FALLBACK ENGINE (Gemini Key-Switch Fixed)
+# 7. AI FIX SECTION
 # ==========================================
+def call_claude(prompt):
+    if not CLAUDE_KEY: return None
+    try:
+        print("🤖 Claude: claude-opus-4-20250805")
+        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+        response = client.messages.create(
+            model="claude-opus-4-20250805", max_tokens=2500, temperature=0.4,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text
+    except Exception as e:
+        print(f"⚠️ Claude Error: {e}")
+        return None
+
+def call_openrouter(prompt):
+    models = ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet", "mistralai/mixtral-8x7b-instruct"]
+    url = "".join(["h", "t", "t", "p", "s", "://", "openrouter.ai", "/api/v1/chat/completions"])
+    for model in models:
+        for key in OPENROUTER_KEYS:
+            try:
+                print(f"🔄 OpenRouter: {model}")
+                r = requests.post(url, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, 
+                                 json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=60)
+                if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
+                if r.status_code == 429: time.sleep(5)
+            except: continue
+    return None
+
+def call_nvidia(prompt):
+    url = "".join(["h", "t", "t", "p", "s", "://", "integrate.api.nvidia.com", "/v1/chat/completions"])
+    models = ["meta/llama3-70b-instruct", "nvidia/nemotron-4-340b-instruct"]
+    for model in models:
+        try:
+            print(f"🧠 NVIDIA: {model}")
+            r = requests.post(url, headers={"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"},
+                             json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=60)
+            if r.status_code == 200: return r.json()['choices'][0]['message']['content']
+        except: continue
+    return None
+
 def call_gemini(prompt):
     models = ["gemini-2.5-flash", "gemini-2.0-flash"]
     for key in GEMINI_KEYS:
@@ -232,222 +248,95 @@ def call_gemini(prompt):
             genai.configure(api_key=key)
             for model_name in models:
                 try:
-                    print(f"🤖 Gemini Model: {model_name}")
+                    print(f"🤖 Gemini: {model_name}")
                     model = genai.GenerativeModel(model_name)
-                    response = model.generate_content(
-                        prompt,
-                        generation_config=genai.types.GenerationConfig(
-                            temperature=0.4,
-                            response_mime_type="application/json"
-                        )
-                    )
-                    if response and response.text:
-                        return response.text
-                    time.sleep(5)
+                    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                    if response and response.text: return response.text
                 except Exception as e:
-                    error_msg = str(e)
-                    # ✅ कोटा फुल होने पर तुरंत इस Key को छोड़कर अगली Key पर जाओ
-                    if "429" in error_msg or "quota" in error_msg.lower():
-                        print(f"⚠️ Quota Full for Key. Switching to next Key...")
-                        break 
-                    print(f"⚠️ Gemini Error ({model_name}): {error_msg[:100]}")
+                    if "429" in str(e) or "quota" in str(e).lower():
+                        print("⏸️ Quota Full. Switching Key...")
+                        break
                     continue
-        except Exception:
-            continue
+        except: continue
+    return None
+
+def generate_questions(text, section):
+    prompt = build_afo_prompt(text, section)
+    for func in [call_claude, call_openrouter, call_nvidia, call_gemini]:
+        raw = func(prompt)
+        if raw:
+            cleaned = extract_and_clean_json(raw)
+            if cleaned: return cleaned
     return None
 
 # ==========================================
-# 8. MAIN WORKFLOW (Extra Memory-Safe for Render)
+# 8. MAIN WORKFLOW
 # ==========================================
 def main_workflow():
     try:
         pdf_path = "book.pdf"
-        print("▶️ ENGINE STARTING: Checking for PDF...")
+        print("▶️ ENGINE STARTING...")
         
-        # 1. Download Step (Quiet Mode to save RAM)
         if not os.path.exists(pdf_path):
-            print("📥 Downloading PDF (117MB)... Please wait.")
-            try:
-                # quiet=True minimizes memory usage during logging
-                gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=True)
-                print("✅ PDF Saved to Disk.")
-                gc.collect() # 🧹 Clear RAM immediately
-                time.sleep(3) # ⏳ Let system sync
-            except Exception as e:
-                print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
-                return
-        
-        # 2. PDF Index Step (Load-Only-On-Demand)
-        print("📖 Reading PDF metadata...")
-        try:
-            with fitz.open(pdf_path) as temp_doc:
-                total_pages = temp_doc.page_count
-            print(f"✅ Total Pages found: {total_pages}")
-        except Exception as e:
-            print(f"❌ CRITICAL ERROR: Could not read PDF! {e}")
-            return
+            print("📥 Downloading PDF (117MB)...")
+            gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=True)
+            print("✅ PDF Saved.")
+            gc.collect()
 
+        with fitz.open(pdf_path) as temp_doc:
+            total_pages = temp_doc.page_count
+        
         curr_page = init_tracker_and_sheet()
         buffer = []
 
-        # 3. Main Processing Loop
         while curr_page < total_pages:
-            try:
-                next_page = min(curr_page + 2, total_pages)
-                section = get_section(curr_page)
-                print(f"\n📖 Processing Pages {curr_page+1}-{next_page} | Topic: {section}")
-
-                text = ""
-                # Open PDF only for this chunk to keep RAM free
-                with fitz.open(pdf_path) as doc:
-                    for i in range(curr_page, next_page):
-                        extracted = extract_text_with_ocr(doc, pdf_path, i)
-                        if extracted: text += extracted + "\n"
-
-                if len(text.strip()) < 50:
-                    update_tracker(next_page)
-                    curr_page = next_page
-                    continue
-
-                questions = generate_questions(text, section)
-
-                if questions:
-                    for q in questions:
-                        buffer.append([
-                            q["section"], q["question"], 
-                            q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
-                            q["answer"], q["explanation"]
-                        ])
-                    
-                    if len(buffer) >= 50:
-                        sheet.append_rows(buffer, value_input_option="RAW")
-                        print(f"✅ Saved batch of {len(buffer)} questions.")
-                        buffer = []
-                
-                update_tracker(next_page)
-                curr_page = next_page
-                gc.collect() # 🧹 Cleaning memory after every chunk
-                time.sleep(8)
-
-            except Exception as e:
-                print(f"❌ Loop error: {e}")
-                time.sleep(30)
-        
-        if buffer:
-            sheet.append_rows(buffer, value_input_option="RAW")
-            print(f"✅ Saved final batch.")
+            next_page = min(curr_page + 2, total_pages)
+            section = get_section(curr_page)
             
-        print("🎉 ALL DONE!")
-
-    except Exception as e:
-        print(f"❌🔥 THREAD CRASHED: {e}")
-        import traceback
-        traceback.print_exc()
-# ==========================================
-# 8. MAIN WORKFLOW (Memory-Safe & Bulletproof)
-# ==========================================
-def main_workflow():
-    # 🌟 MASTER TRY-CATCH BLOCK
-    try:
-        pdf_path = "book.pdf"
-        print("▶️ ENGINE STARTING: Checking for PDF...")
-        
-        # 1. Download Step
-        if not os.path.exists(pdf_path):
-            print("📥 Downloading PDF...")
             try:
-                gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
-                print("✅ PDF Downloaded Successfully!")
-            except Exception as e:
-                print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
-                return
-        else:
-            print("✅ PDF already exists. Skipping download.")
-
-        # 2. PDF Open Step - सिर्फ पेज काउंट लेने के लिए खोला और बंद किया
-        print("📖 Reading PDF index...")
-        try:
-            with fitz.open(pdf_path) as temp_doc:
-                total_pages = temp_doc.page_count
-            print(f"✅ PDF Index Read successfully! Total Pages: {total_pages}")
-        except Exception as e:
-            print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
-            return
-
-        print("📊 Connecting to Google Sheet & MongoDB Tracker...")
-        curr_page = init_tracker_and_sheet()
-        buffer = []
-
-        # 3. Main Processing Loop
-        while curr_page < total_pages:
-            try:
-                next_page = min(curr_page + 2, total_pages)
-                section = get_section(curr_page)
-                print(f"\n📖 Processing Pages {curr_page+1}-{next_page} | Topic: {section}")
+                print(f"\n📖 Pages {curr_page+1}-{next_page} | {section}")
 
                 text = ""
-                # 🌟 MEMORY FIX: लूप के अंदर PDF खोलें, पढ़ें, और तुरंत बंद कर दें (No RAM Leak)
                 with fitz.open(pdf_path) as doc:
                     for i in range(curr_page, next_page):
                         extracted = extract_text_with_ocr(doc, pdf_path, i)
                         if extracted: text += extracted + "\n"
 
-                if len(text.strip()) < 50:
-                    print("⚠️ Skipping blank chunk")
-                    update_tracker(next_page)
-                    curr_page = next_page
-                    continue
-
-                questions = generate_questions(text, section)
-
-                if questions and len(questions) > 0:
-                    for q in questions:
-                        buffer.append([
-                            q["section"], q["question"], 
-                            q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
-                            q["answer"], q["explanation"]
-                        ])
-                    
-                    if len(buffer) >= 50:
-                        sheet.append_rows(buffer, value_input_option="RAW")
-                        print(f"✅ Batch Appended {len(buffer)} MCQs to Sheet")
-                        buffer = []
+                if len(text.strip()) > 50:
+                    questions = generate_questions(text, section)
+                    if questions:
+                        for q in questions:
+                            buffer.append([q.get("section", section), q.get("question"), q.get("opt1"), q.get("opt2"), q.get("opt3"), q.get("opt4"), q.get("opt5"), q.get("answer"), q.get("explanation")])
+                        
+                        if len(buffer) >= 50:
+                            sheet.append_rows(buffer, value_input_option="RAW")
+                            print(f"✅ Batch Saved: {len(buffer)} MCQs")
+                            buffer = []
                 
                 update_tracker(next_page)
                 curr_page = next_page
-                print("⏳ Cooldown for 8 seconds...")
+                gc.collect()
                 time.sleep(8)
-
+                
             except Exception as e:
-                print(f"❌ Loop error: {e}")
-                time.sleep(60)
-            finally:
-                text = None
-                questions = None
-                gc.collect() # 🧹 Force free memory
-
-        if len(buffer) > 0:
-            sheet.append_rows(buffer, value_input_option="RAW")
-            print(f"✅ Final Batch Appended {len(buffer)} MCQs to Sheet")
+                print(f"❌ Error on Page {curr_page+1}: {e}")
+                print("⏭️ Skipping to next page to prevent infinite loop...")
+                update_tracker(next_page)
+                curr_page = next_page
+                time.sleep(10)
         
-        print("🎉 ENTIRE BOOK PROCESSED SUCCESSFULLY!")
-
-    # 🌟 MASTER CATCH
+        if buffer: sheet.append_rows(buffer, value_input_option="RAW")
+        print("🎉 FINISHED!")
     except Exception as e:
-        print(f"❌🔥 CRITICAL THREAD CRASH: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ CRITICAL CRASH: {e}")
 
 # ==========================================
 # 9. FLASK SERVER
 # ==========================================
 app = Flask(__name__)
-
 @app.route('/')
-def home():
-    return "AGTA 2026 Engine LIVE!"
+def home(): return "AGTA 2026 Engine LIVE!"
 
 if __name__ == "__main__":
-    print("🚀 Starting Agri AI Engine with Claude")
     Thread(target=main_workflow, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), threaded=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
