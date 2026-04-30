@@ -460,82 +460,91 @@ def generate_questions(text, section):
 # 8. MAIN WORKFLOW (Crash-Proof & Batching)
 # ==========================================
 def main_workflow():
-    pdf_path = "book.pdf"
-    
-    # 1. Download Step with Try/Except Safety
-    if not os.path.exists(pdf_path):
-        print("📥 Downloading PDF...")
+    # 🌟 MASTER TRY-CATCH BLOCK STARTS HERE
+    try:
+        pdf_path = "book.pdf"
+        
+        # 1. Download Step with Try/Except Safety
+        if not os.path.exists(pdf_path):
+            print("📥 Downloading PDF...")
+            try:
+                gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
+                print("✅ PDF Downloaded Successfully!")
+            except Exception as e:
+                print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
+                return
+
+        # 2. PDF Open Step with Try/Except Safety
         try:
-            gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
-            print("✅ PDF Downloaded Successfully!")
+            doc = fitz.open(pdf_path)
+            total_pages = doc.page_count
         except Exception as e:
-            print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
+            print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
             return
 
-    # 2. PDF Open Step with Try/Except Safety
-    try:
-        doc = fitz.open(pdf_path)
-        total_pages = doc.page_count
-    except Exception as e:
-        print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
-        return
+        curr_page = init_tracker_and_sheet()
+        buffer = []
 
-    curr_page = init_tracker_and_sheet()
-    buffer = []
+        # 3. Main Processing Loop
+        while curr_page < total_pages:
+            try:
+                next_page = min(curr_page + 2, total_pages)
+                section = get_section(curr_page)
+                print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
 
-    # 3. Main Processing Loop
-    while curr_page < total_pages:
-        try:
-            next_page = min(curr_page + 2, total_pages)
-            section = get_section(curr_page)
-            print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
+                text = ""
+                for i in range(curr_page, next_page):
+                    extracted = extract_text_with_ocr(doc, pdf_path, i)
+                    if extracted: text += extracted + "\n"
 
-            text = ""
-            for i in range(curr_page, next_page):
-                extracted = extract_text_with_ocr(doc, pdf_path, i)
-                if extracted: text += extracted + "\n"
+                if len(text.strip()) < 50:
+                    print("⚠️ Skipping blank chunk")
+                    update_tracker(next_page)
+                    curr_page = next_page
+                    continue
 
-            if len(text.strip()) < 50:
-                print("⚠️ Skipping blank chunk")
+                questions = generate_questions(text, section)
+
+                if questions and len(questions) > 0:
+                    for q in questions:
+                        buffer.append([
+                            q["section"], q["question"], 
+                            q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
+                            q["answer"], q["explanation"]
+                        ])
+                    
+                    # Batch Buffer Logic (Append every 50 questions)
+                    if len(buffer) >= 50:
+                        sheet.append_rows(buffer, value_input_option="RAW")
+                        print(f"✅ Batch Appended {len(buffer)} MCQs to Sheet")
+                        buffer = []
+                
                 update_tracker(next_page)
                 curr_page = next_page
-                continue
+                print("⏳ Cooldown for 8 seconds...")
+                time.sleep(8)
 
-            questions = generate_questions(text, section)
+            except Exception as e:
+                print(f"❌ Loop error: {e}")
+                time.sleep(60)
+            finally:
+                text = None
+                questions = None
+                gc.collect()
 
-            if questions and len(questions) > 0:
-                for q in questions:
-                    buffer.append([
-                        q["section"], q["question"], 
-                        q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
-                        q["answer"], q["explanation"]
-                    ])
-                
-                # Batch Buffer Logic (Append every 50 questions)
-                if len(buffer) >= 50:
-                    sheet.append_rows(buffer, value_input_option="RAW")
-                    print(f"✅ Batch Appended {len(buffer)} MCQs to Sheet")
-                    buffer = []
-            
-            update_tracker(next_page)
-            curr_page = next_page
-            print("⏳ Cooldown for 8 seconds...")
-            time.sleep(8)
+        # Flush remaining buffer at the end
+        if len(buffer) > 0:
+            sheet.append_rows(buffer, value_input_option="RAW")
+            print(f"✅ Final Batch Appended {len(buffer)} MCQs to Sheet")
+        
+        doc.close()
+        print("🎉 ENTIRE BOOK PROCESSED SUCCESSFULLY!")
 
-        except Exception as e:
-            print(f"❌ Loop error: {e}")
-            time.sleep(60)
-        finally:
-            text = None
-            questions = None
-            gc.collect()
-
-    # Flush remaining buffer at the end
-    if len(buffer) > 0:
-        sheet.append_rows(buffer, value_input_option="RAW")
-        print(f"✅ Final Batch Appended {len(buffer)} MCQs to Sheet")
-    
-    doc.close()
+    # 🌟 MASTER CATCH: Catch ANY error that slipped through!
+    except Exception as e:
+        print(f"❌🔥 CRITICAL THREAD CRASH: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # 9. FLASK SERVER
