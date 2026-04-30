@@ -383,6 +383,7 @@ def main_workflow():
     # 🌟 MASTER TRY-CATCH BLOCK
     try:
         pdf_path = "book.pdf"
+        print("▶️ ENGINE STARTING: Checking for PDF...")
         
         # 1. Download Step
         if not os.path.exists(pdf_path):
@@ -393,15 +394,20 @@ def main_workflow():
             except Exception as e:
                 print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
                 return
+        else:
+            print("✅ PDF already exists. Skipping download.")
 
-        # 2. PDF Open Step - सिर्फ पेज काउंट लेने के लिए खोला
+        # 2. PDF Open Step - सिर्फ पेज काउंट लेने के लिए खोला और बंद किया
+        print("📖 Reading PDF index...")
         try:
             with fitz.open(pdf_path) as temp_doc:
                 total_pages = temp_doc.page_count
+            print(f"✅ PDF Index Read successfully! Total Pages: {total_pages}")
         except Exception as e:
             print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
             return
 
+        print("📊 Connecting to Google Sheet & MongoDB Tracker...")
         curr_page = init_tracker_and_sheet()
         buffer = []
 
@@ -410,7 +416,7 @@ def main_workflow():
             try:
                 next_page = min(curr_page + 2, total_pages)
                 section = get_section(curr_page)
-                print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
+                print(f"\n📖 Processing Pages {curr_page+1}-{next_page} | Topic: {section}")
 
                 text = ""
                 # 🌟 MEMORY FIX: लूप के अंदर PDF खोलें, पढ़ें, और तुरंत बंद कर दें (No RAM Leak)
@@ -451,7 +457,7 @@ def main_workflow():
             finally:
                 text = None
                 questions = None
-                gc.collect()
+                gc.collect() # 🧹 Force free memory
 
         if len(buffer) > 0:
             sheet.append_rows(buffer, value_input_option="RAW")
