@@ -239,90 +239,90 @@ def extract_and_clean_json(raw):
     return result if result else None
 
 # ========================
-# AI PROVIDERS (with timeout and correct order: Gemini first)
+# API CALLS WITH ORDER: OPENROUTER -> NVIDIA -> GEMINI -> CLAUDE
 # ========================
-def call_gemini(prompt):
-    if not GEMINI_KEYS:
-        return None
-    for key in GEMINI_KEYS:
-        try:
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content(
-                prompt + "\n\nReturn STRICT valid JSON array only. No extra text.",
-                generation_config={"response_mime_type": "text/plain"}
-            )
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            logger.warning(f"Gemini error: {e}")
-            continue
-    return None
 
-def call_claude(prompt):
-    if not CLAUDE_KEY:
-        return None
-    try:
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-        resp = client.messages.create(
-            model="claude-3-5-sonnet-20240620",   # stable model
-            max_tokens=2500,
-            temperature=0.4,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return resp.content[0].text
-    except Exception as e:
-        logger.warning(f"Claude error: {e}")
-        return None
-
+# ---------- 1. OPENROUTER (3 keys, auto model) ----------
 def call_openrouter(prompt):
     if not OPENROUTER_KEYS:
         return None
-    models = ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet", "mistralai/mixtral-8x7b-instruct"]
+    models = ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet"]
     url = "https://openrouter.ai/api/v1/chat/completions"
-    for key in OPENROUTER_KEYS:          # keys first to avoid slow loops
+    for key in OPENROUTER_KEYS:
         for model in models:
             try:
-                resp = requests.post(url, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                                     json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
+                resp = requests.post(
+                    url,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+                    timeout=30
+                )
                 if resp.status_code == 200:
                     return resp.json()["choices"][0]["message"]["content"]
                 if resp.status_code == 429:
-                    time.sleep(2)
-            except:
+                    break  # quota full, try next key
+            except Exception:
                 continue
     return None
 
+# ---------- 2. NVIDIA (best for MCQs) ----------
 def call_nvidia(prompt):
     if not NVIDIA_KEY:
         return None
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    models = ["meta/llama3-70b-instruct", "nvidia/nemotron-4-340b-instruct"]
+    models = ["nvidia/nemotron-4-340b-instruct", "meta/llama3-70b-instruct"]
     for model in models:
         try:
-            resp = requests.post(url, headers={"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"},
-                                 json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+                timeout=30
+            )
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
-        except:
+        except Exception:
             continue
     return None
 
-def generate_questions(text, section):
-    prompt = build_prompt(text, section)
-    start_time = time.time()
-    # Order: Gemini (fastest) → Claude (quality) → OpenRouter → NVIDIA
-    for func in [call_gemini, call_claude, call_openrouter, call_nvidia]:
-        if time.time() - start_time > 60:
-            logger.warning("Global timeout (60s) – moving to next batch")
-            return None
-        raw = func(prompt)
-        if raw:
-            cleaned = extract_and_clean_json(raw)
-            if cleaned:
-                return cleaned
+# ---------- 3. GEMINI (9 keys, models: 2.5-flash and 2.0-flash) ----------
+def call_gemini(prompt):
+    if not GEMINI_KEYS:
+        return None
+    models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    for key in GEMINI_KEYS:
+        for model_name in models:
+            try:
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    prompt + "\n\nReturn STRICT valid JSON array only. No extra text.",
+                    generation_config={"response_mime_type": "text/plain"}
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                if "429" in str(e):
+                    break  # quota exhaust, next key
+                continue
     return None
 
+# ---------- 4. CLAUDE (best: sonnet 20241022) ----------
+def call_claude(prompt):
+    if not CLAUDE_KEY:
+        return None
+    try:
+        client = anthropic.Anthropic(api_key=CLAUDE_KEY, proxies=None)
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=2500,
+            temperature=0.4,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text
+    except Exception as e:
+        logger.warning(f"Claude error: {e}")
+        return None
 # ========================
 # GOOGLE SHEETS WRITE WITH RETRY
 # ========================
