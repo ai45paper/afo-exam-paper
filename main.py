@@ -16,22 +16,35 @@ from threading import Thread
 import google.generativeai as genai
 import anthropic
 
-# Optional OCR
+# ========================
+# HARDCODED START PAGE (1‑BASED)
+# Yahan jo number likhoge wahi page se start hoga
+# Example: 966 means page number 966
+# ========================
+START_PAGE_1BASED = 970   # page 970 se start hoga
+START_PAGE_0BASED = START_PAGE_1BASED - 1   # 0‑based for code
+
+# Optional OCR (will be skipped if not installed)
 try:
     from pdf2image import convert_from_path
     import pytesseract
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+    print("⚠️ OCR not available – text extraction from PDF only")
 
-# ---------- Logging ----------
+# ========================
+# LOGGING SETUP
+# ========================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ---------- ENV VARS ----------
+# ========================
+# ENVIRONMENT VARIABLES (must be set on Render)
+# ========================
 CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 NVIDIA_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEYS", "").split(",") if k.strip()]
@@ -42,14 +55,17 @@ SHEET_ID = os.getenv("SHEET_ID", "").strip()
 DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "").strip()
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
 
-MANUAL_START_PAGE = int(os.getenv("MANUAL_START_PAGE", "969")) - 1   # 0‑based
+# Optional Poppler path for OCR (default /usr/bin)
 POPPLER_PATH = os.getenv("POPPLER_PATH", "/usr/bin")
 
+# Validate mandatory vars
 if not MONGO_URI or not SHEET_ID or not DRIVE_FILE_ID or not SERVICE_ACCOUNT_JSON:
-    logger.error("Missing required environment variables. Exiting.")
+    logger.error("Missing required environment variables (MONGO_URI, SHEET_ID, DRIVE_FILE_ID, SERVICE_ACCOUNT_JSON). Exiting.")
     sys.exit(1)
 
-# ---------- SECTIONS ----------
+# ========================
+# SECTION RANGES (1‑BASED)
+# ========================
 SECTION_RANGES = [
     (1, 75, "Agronomy"), (76, 242, "Horticulture"), (243, 308, "Entomology"),
     (309, 389, "Fisheries"), (390, 517, "Animal Husbandry"), (518, 557, "Plant Pathology"),
@@ -61,11 +77,13 @@ SECTION_RANGES = [
     (967, 1075, "Soil Science")
 ]
 
-# ---------- DB & SHEETS ----------
+# ========================
+# DATABASE & SHEETS
+# ========================
 logger.info("Connecting to MongoDB...")
 mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 try:
-    mongo_client.server_info()  # force connection check
+    mongo_client.server_info()   # force connection check
 except Exception as e:
     logger.error(f"MongoDB connection failed: {e}")
     sys.exit(1)
@@ -79,16 +97,14 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
-# ---------- TRACKER ----------
+# ========================
+# TRACKER – ALWAYS START FROM HARDCODED PAGE
+# ========================
 def init_tracker():
-    tracker = tracker_col.find_one({"_id": "pdf_tracker"})
-    last = tracker.get("current_page", 0) if tracker else 0
-    if last < MANUAL_START_PAGE:
-        last = MANUAL_START_PAGE
-        update_tracker(last)
-        logger.info(f"Manual override: starting from page {last+1}")
-    else:
-        logger.info(f"Resuming from page {last+1}")
+    """Force start from hardcoded page – ignore any previous progress."""
+    last = START_PAGE_0BASED
+    update_tracker(last)
+    logger.info(f"🚀 Hardcoded start: page {last+1} (1‑based)")
     return last
 
 def update_tracker(page_idx):
@@ -101,42 +117,92 @@ def get_section(page_idx):
             return name
     return "General Agriculture"
 
-# ---------- TEXT EXTRACTION ----------
+# ========================
+# TEXT EXTRACTION (with OCR fallback but limited)
+# ========================
 def extract_text_with_ocr(doc, pdf_path, page_idx):
     page = doc.load_page(page_idx)
     text = page.get_text()
     if text and len(text.strip()) > 100:
         return text
-    if not OCR_AVAILABLE or page_idx > 1200:   # skip OCR after page 1200
+    # Skip OCR on very high pages (>1200) or if OCR not available
+    if not OCR_AVAILABLE or page_idx > 1200:
         return ""
-    logger.info(f"OCR on page {page_idx+1}")
+    logger.info(f"🔍 OCR on page {page_idx+1}")
     try:
         images = convert_from_path(pdf_path, first_page=page_idx+1, last_page=page_idx+1, dpi=200, poppler_path=POPPLER_PATH)
-        ocr = ""
+        ocr_text = ""
         for img in images:
-            ocr += pytesseract.image_to_string(img.convert("L"), lang="eng", config="--oem 3 --psm 6")
-        return ocr
+            ocr_text += pytesseract.image_to_string(img.convert("L"), lang="eng", config="--oem 3 --psm 6")
+        return ocr_text
     except Exception as e:
         logger.warning(f"OCR failed: {e}")
         return ""
 
-# ---------- PROMPT ----------
+# ========================
+# PROMPT FOR QUESTION GENERATION
+# ========================
 def build_prompt(text, section):
-    examples = """... (same as before) ..."""  # keep your examples
-    return f"""You are Satyam Sir... (same prompt but add: Return STRICT valid JSON only without explanation)
-    
-    Topic: {section}
-    {examples}
-    
-    Expected JSON schema: [...]
-    Content: {text[:5000]}
-    """
+    examples = """
+REFERENCE QUESTION STYLE (Follow exactly):
 
-# ---------- JSON CLEANER ----------
+The excretory organ of silkworm which is located at the junction of the midgut and hindgut is known as
+Options: Proboscis | Malpighian tubule | Nephridia | Green glands | None
+Answer: Malpighian tubule
+
+Type of silviculture system which can regenerate through seeds and where the majority have a long life is
+Options: Pollarding | High forest | Coppicing | Forking | None
+Answer: High forest
+
+The process of removing the green colouring (known as chlorophyll) from the skin of citrus fruit by introducing measured amounts of ethylene gas is known as
+Options: Ripening | Degreening | Physiological maturity | Denavelling | Dehusking
+Answer: Degreening
+"""
+    return f"""You are Satyam Sir, an expert agriculture mentor setting a mock paper for the AGTA 2026 and IBPS AFO Mains batches.
+
+YOUR TASK: Generate exactly 10 high-quality multiple-choice questions from the provided text.
+
+STRICT RULES:
+1. Language: 100% STRICTLY ENGLISH ONLY. No Hindi.
+2. Difficulty: Moderate level. Keep them engaging.
+3. Options: Exactly 5 options per question.
+4. Answer Match: The text in the 'answer' field MUST exactly match the text of one of the 5 options.
+5. Question Length: 20 to 35 words.
+6. Explanation: Max 20 words.
+7. Format: Return STRICT valid JSON array ONLY. NO markdown code blocks, NO extra text, NO explanation before/after.
+
+Topic: {section}
+
+{examples}
+
+EXPECTED JSON SCHEMA:
+[
+  {{
+    "section": "{section}",
+    "question": "Question text here strictly in English...",
+    "opt1": "First option text",
+    "opt2": "Second option text",
+    "opt3": "Third option text",
+    "opt4": "Fourth option text",
+    "opt5": "Fifth option text",
+    "answer": "Exact text of the correct option",
+    "explanation": "Short conceptual explanation strictly in English."
+  }}
+]
+
+Content:
+{text[:5000]}
+"""
+
+# ========================
+# JSON PARSER (robust)
+# ========================
 def extract_and_clean_json(raw):
     if not raw:
         return None
+    # Remove markdown code blocks
     clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE)
+    # Find first JSON array
     match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', clean)
     if not match:
         return None
@@ -145,11 +211,11 @@ def extract_and_clean_json(raw):
     except:
         return None
     data = data[:10]
-    result = []
     def clean_opt(opt):
         opt = str(opt).strip()
         opt = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', opt)
         return opt.strip()
+    result = []
     for item in data:
         q = item.get("question", "").strip()
         opt1 = clean_opt(item.get("opt1",""))
@@ -158,6 +224,7 @@ def extract_and_clean_json(raw):
         opt4 = clean_opt(item.get("opt4",""))
         opt5 = clean_opt(item.get("opt5",""))
         ans = clean_opt(item.get("answer",""))
+        expl = str(item.get("explanation","")).strip()
         if not q or not ans:
             continue
         if ans.lower() not in [opt1.lower(), opt2.lower(), opt3.lower(), opt4.lower(), opt5.lower()]:
@@ -167,11 +234,13 @@ def extract_and_clean_json(raw):
             "question": q,
             "opt1": opt1, "opt2": opt2, "opt3": opt3, "opt4": opt4, "opt5": opt5,
             "answer": ans,
-            "explanation": str(item.get("explanation","")).strip()
+            "explanation": expl
         })
     return result if result else None
 
-# ---------- AI PROVIDERS (with 60s global timeout) ----------
+# ========================
+# AI PROVIDERS (with timeout and correct order: Gemini first)
+# ========================
 def call_gemini(prompt):
     if not GEMINI_KEYS:
         return None
@@ -180,7 +249,7 @@ def call_gemini(prompt):
             genai.configure(api_key=key)
             model = genai.GenerativeModel("gemini-2.5-flash")
             response = model.generate_content(
-                prompt + "\n\nReturn STRICT valid JSON only without explanation.",
+                prompt + "\n\nReturn STRICT valid JSON array only. No extra text.",
                 generation_config={"response_mime_type": "text/plain"}
             )
             if response and response.text:
@@ -196,7 +265,7 @@ def call_claude(prompt):
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
         resp = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-5-sonnet-20240620",   # stable model
             max_tokens=2500,
             temperature=0.4,
             messages=[{"role": "user", "content": prompt}]
@@ -211,7 +280,7 @@ def call_openrouter(prompt):
         return None
     models = ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet", "mistralai/mixtral-8x7b-instruct"]
     url = "https://openrouter.ai/api/v1/chat/completions"
-    for key in OPENROUTER_KEYS:          # keys first (avoid slow loop)
+    for key in OPENROUTER_KEYS:          # keys first to avoid slow loops
         for model in models:
             try:
                 resp = requests.post(url, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -242,10 +311,10 @@ def call_nvidia(prompt):
 def generate_questions(text, section):
     prompt = build_prompt(text, section)
     start_time = time.time()
-    # Priority: Gemini -> Claude -> OpenRouter -> NVIDIA
+    # Order: Gemini (fastest) → Claude (quality) → OpenRouter → NVIDIA
     for func in [call_gemini, call_claude, call_openrouter, call_nvidia]:
         if time.time() - start_time > 60:
-            logger.warning("Global timeout (60s) reached")
+            logger.warning("Global timeout (60s) – moving to next batch")
             return None
         raw = func(prompt)
         if raw:
@@ -254,55 +323,62 @@ def generate_questions(text, section):
                 return cleaned
     return None
 
-# ---------- SHEETS WRITE WITH RETRY ----------
+# ========================
+# GOOGLE SHEETS WRITE WITH RETRY
+# ========================
 def append_to_sheet(rows):
     for attempt in range(3):
         try:
             sheet.append_rows(rows, value_input_option="RAW")
-            logger.info(f"Appended {len(rows)} rows to Google Sheets")
+            logger.info(f"✅ Appended {len(rows)} rows to Google Sheets")
             return True
         except Exception as e:
             logger.warning(f"Sheets write attempt {attempt+1} failed: {e}")
             time.sleep(5 * (attempt + 1))
-    logger.error("Failed to write to Google Sheets after 3 retries")
+    logger.error("❌ Failed to write to Google Sheets after 3 retries")
     return False
 
-# ---------- MAIN WORKFLOW ----------
+# ========================
+# MAIN WORKFLOW
+# ========================
 def main_workflow():
     pdf_path = "book.pdf"
-    # Download if missing
+    
+    # Download PDF if not present
     if not os.path.exists(pdf_path):
-        logger.info("Downloading PDF from Google Drive...")
+        logger.info("📥 Downloading PDF from Google Drive...")
         try:
             gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
             if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
-                raise Exception("Empty download")
+                raise Exception("Downloaded file is empty")
+            logger.info("✅ PDF downloaded")
         except Exception as e:
             logger.error(f"Download failed: {e}")
             return
 
+    # Get total pages
     with fitz.open(pdf_path) as doc:
-        total = doc.page_count
-    logger.info(f"Total pages: {total}")
+        total_pages = doc.page_count
+    logger.info(f"📄 Total PDF pages: {total_pages}")
 
-    curr = init_tracker()
-    if curr >= total:
+    current = init_tracker()   # starts from hardcoded page 966
+    if current >= total_pages:
         logger.info("Already completed")
         return
 
     buffer = []
-    while curr < total:
-        nxt = min(curr + 2, total)
-        section = get_section(curr)
-        logger.info(f"Processing pages {curr+1}-{nxt} | {section}")
+    while current < total_pages:
+        next_page = min(current + 2, total_pages)
+        section = get_section(current)
+        logger.info(f"📖 Processing pages {current+1}-{next_page} | {section}")
 
         combined = ""
         with fitz.open(pdf_path) as doc:
-            for i in range(curr, nxt):
-                text = extract_text_with_ocr(doc, pdf_path, i)
-                if text:
-                    combined += text + "\n"
-        # Memory protection
+            for i in range(current, next_page):
+                page_text = extract_text_with_ocr(doc, pdf_path, i)
+                if page_text:
+                    combined += page_text + "\n"
+        # Memory safety: keep only first 15000 chars
         combined = combined[:15000]
 
         if len(combined.strip()) > 50:
@@ -317,30 +393,34 @@ def main_workflow():
                     if append_to_sheet(buffer):
                         buffer = []
             else:
-                logger.warning("No valid questions generated")
+                logger.warning("No valid questions generated for this batch")
         else:
-            logger.warning(f"Insufficient text on pages {curr+1}-{nxt}")
+            logger.warning(f"Insufficient text on pages {current+1}-{next_page}")
 
-        update_tracker(nxt)
-        curr = nxt
+        update_tracker(next_page)
+        current = next_page
         gc.collect()
-        time.sleep(8)
+        time.sleep(8)   # rate limiting
 
     if buffer:
         append_to_sheet(buffer)
-    logger.info("All pages processed successfully!")
+    logger.info("🎉 All pages processed successfully!")
 
-# ---------- FLASK APP ----------
+# ========================
+# FLASK SERVER (for health checks)
+# ========================
 app = Flask(__name__)
+
 @app.route('/')
 def home():
-    return "AGTA 2026 Engine LIVE (production grade)"
+    return "AGTA 2026 Engine LIVE – Hardcoded start from page 966"
 
 @app.route('/health')
 def health():
     return "OK", 200
 
 if __name__ == "__main__":
+    # Run the workflow in a background thread
     Thread(target=main_workflow, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
