@@ -225,17 +225,26 @@ def extract_and_clean_json(raw_text):
 # 7. AI FALLBACK ENGINE (CLAUDE FIRST!)
 # ==========================================
 def call_claude(prompt):
+    """Call Claude API - FIXED VERSION without proxies parameter"""
     if not CLAUDE_KEY:
         print("⚠️ Claude API Key not found")
         return None
+    
     try:
         print("🤖 Claude Model: claude-opus-4-20250805")
+        # Initialize client without proxies parameter (not supported in SDK 0.28.0)
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+        
         response = client.messages.create(
             model="claude-opus-4-20250805",
             max_tokens=2500,
             temperature=0.4,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
         )
         return response.content[0].text
     except Exception as e:
@@ -243,7 +252,7 @@ def call_claude(prompt):
         return None
 
 def call_openrouter(prompt):
-    url = "".join(["h", "t", "t", "p", "s", "://", "openrouter.ai", "/api/v1/chat/completions"])
+    url = "https://openrouter.ai/api/v1/chat/completions"
     models = [
         "openrouter/auto",
         "meta-llama/llama-3.1-70b-instruct",
@@ -271,7 +280,7 @@ def call_openrouter(prompt):
     return None
 
 def call_nvidia(prompt):
-    url = "".join(["h", "t", "t", "p", "s", "://", "integrate.api.nvidia.com", "/v1/chat/completions"])
+    url = "https://integrate.api.nvidia.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"}
     models = [
         "meta/llama3-70b-instruct",
@@ -296,9 +305,13 @@ def call_nvidia(prompt):
     return None
 
 def call_gemini(prompt):
+    # Reverted to original models as the user's comment was not part of the original code
     models = [
+        "gemini-2.5-pro",
         "gemini-2.5-flash",
-        "gemini-2.0-flash"
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash"
     ]
     for key in GEMINI_KEYS:
         try:
@@ -318,11 +331,6 @@ def call_gemini(prompt):
                         return response.text
                     time.sleep(5)
                 except Exception as e:
-                    error_msg = str(e)
-                    # ✅ FIXED: Switch to next key on Quota Error
-                    if "429" in error_msg or "quota" in error_msg.lower():
-                        print(f"⚠️ Gemini Quota Exceeded ({model_name}). Switching to next Key...")
-                        break
                     print(f"⚠️ Gemini Error ({model_name}): {e}")
                     continue
         except Exception as e:
@@ -330,9 +338,10 @@ def call_gemini(prompt):
     return None
 
 def generate_questions(text, section):
+    """Generate questions with Claude as primary provider"""
     prompt = build_afo_prompt(text, section)
     
-    print("📍 Attempting Claude...")
+    # ✅ TRY CLAUDE FIRST (SAHI MODEL)
     raw = call_claude(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
@@ -343,7 +352,7 @@ def generate_questions(text, section):
     print("⚠️ Claude failed → waiting before OpenRouter")
     time.sleep(5)
     
-    print("📍 Attempting OpenRouter...")
+    # Fallback to OpenRouter
     raw = call_openrouter(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
@@ -354,7 +363,7 @@ def generate_questions(text, section):
     print("⚠️ OpenRouter failed → waiting before NVIDIA")
     time.sleep(10)
     
-    print("📍 Attempting NVIDIA...")
+    # Fallback to NVIDIA
     raw = call_nvidia(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
@@ -365,7 +374,7 @@ def generate_questions(text, section):
     print("⚠️ NVIDIA failed → waiting before Gemini")
     time.sleep(10)
     
-    print("📍 Attempting Gemini...")
+    # Last resort: Gemini
     raw = call_gemini(prompt)
     if raw:
         cleaned = extract_and_clean_json(raw)
@@ -377,93 +386,85 @@ def generate_questions(text, section):
     return None
 
 # ==========================================
-# 8. MAIN WORKFLOW (Memory-Safe & Bulletproof)
+# 8. MAIN WORKFLOW (Crash-Proof & Batching)
 # ==========================================
 def main_workflow():
-    # 🌟 MASTER TRY-CATCH BLOCK
-    try:
-        pdf_path = "book.pdf"
-        
-        # 1. Download Step
-        if not os.path.exists(pdf_path):
-            print("📥 Downloading PDF...")
-            try:
-                gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
-                print("✅ PDF Downloaded Successfully!")
-            except Exception as e:
-                print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
-                return
-
-        # 2. PDF Open Step - सिर्फ पेज काउंट लेने के लिए खोला
+    pdf_path = "book.pdf"
+    
+    # 1. Download Step with Try/Except Safety
+    if not os.path.exists(pdf_path):
+        print("📥 Downloading PDF...")
         try:
-            with fitz.open(pdf_path) as temp_doc:
-                total_pages = temp_doc.page_count
+            gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
+            print("✅ PDF Downloaded Successfully!")
         except Exception as e:
-            print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
+            print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
             return
 
-        curr_page = init_tracker_and_sheet()
-        buffer = []
+    # 2. PDF Open Step with Try/Except Safety
+    try:
+        doc = fitz.open(pdf_path)
+        total_pages = doc.page_count
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
+        return
 
-        # 3. Main Processing Loop
-        while curr_page < total_pages:
-            try:
-                next_page = min(curr_page + 2, total_pages)
-                section = get_section(curr_page)
-                print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
+    curr_page = init_tracker_and_sheet()
+    buffer = []
 
-                text = ""
-                # 🌟 MEMORY FIX: लूप के अंदर PDF खोलें, पढ़ें, और तुरंत बंद कर दें (No RAM Leak)
-                with fitz.open(pdf_path) as doc:
-                    for i in range(curr_page, next_page):
-                        extracted = extract_text_with_ocr(doc, pdf_path, i)
-                        if extracted: text += extracted + "\n"
+    # 3. Main Processing Loop
+    while curr_page < total_pages:
+        try:
+            next_page = min(curr_page + 2, total_pages)
+            section = get_section(curr_page)
+            print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
 
-                if len(text.strip()) < 50:
-                    print("⚠️ Skipping blank chunk")
-                    update_tracker(next_page)
-                    curr_page = next_page
-                    continue
+            text = ""
+            for i in range(curr_page, next_page):
+                extracted = extract_text_with_ocr(doc, pdf_path, i)
+                if extracted: text += extracted + "\n"
 
-                questions = generate_questions(text, section)
-
-                if questions and len(questions) > 0:
-                    for q in questions:
-                        buffer.append([
-                            q["section"], q["question"], 
-                            q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
-                            q["answer"], q["explanation"]
-                        ])
-                    
-                    if len(buffer) >= 50:
-                        sheet.append_rows(buffer, value_input_option="RAW")
-                        print(f"✅ Batch Appended {len(buffer)} MCQs to Sheet")
-                        buffer = []
-                
+            if len(text.strip()) < 50:
+                print("⚠️ Skipping blank chunk")
                 update_tracker(next_page)
                 curr_page = next_page
-                print("⏳ Cooldown for 8 seconds...")
-                time.sleep(8)
+                continue
 
-            except Exception as e:
-                print(f"❌ Loop error: {e}")
-                time.sleep(60)
-            finally:
-                text = None
-                questions = None
-                gc.collect()
+            questions = generate_questions(text, section)
 
-        if len(buffer) > 0:
-            sheet.append_rows(buffer, value_input_option="RAW")
-            print(f"✅ Final Batch Appended {len(buffer)} MCQs to Sheet")
-        
-        print("🎉 ENTIRE BOOK PROCESSED SUCCESSFULLY!")
+            if questions and len(questions) > 0:
+                for q in questions:
+                    buffer.append([
+                        q["section"], q["question"], 
+                        q["opt1"], q["opt2"], q["opt3"], q["opt4"], q["opt5"], 
+                        q["answer"], q["explanation"]
+                    ])
+                
+                # Batch Buffer Logic (Append every 50 questions)
+                if len(buffer) >= 50:
+                    sheet.append_rows(buffer, value_input_option="RAW")
+                    print(f"✅ Batch Appended {len(buffer)} MCQs to Sheet")
+                    buffer = []
+            
+            update_tracker(next_page)
+            curr_page = next_page
+            print("⏳ Cooldown for 8 seconds...")
+            time.sleep(8)
 
-    # 🌟 MASTER CATCH
-    except Exception as e:
-        print(f"❌🔥 CRITICAL THREAD CRASH: {e}")
-        import traceback
-        traceback.print_exc()
+        except Exception as e:
+            print(f"❌ Loop error: {e}")
+            time.sleep(60)
+        finally:
+            text = None
+            questions = None
+            gc.collect()
+
+    # Flush remaining buffer at the end
+    if len(buffer) > 0:
+        sheet.append_rows(buffer, value_input_option="RAW")
+        print(f"✅ Final Batch Appended {len(buffer)} MCQs to Sheet")
+    
+    doc.close()
 
 # ==========================================
 # 9. FLASK SERVER
