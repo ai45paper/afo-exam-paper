@@ -457,14 +457,14 @@ def generate_questions(text, section):
     print("❌ All AI providers failed for this batch")
     return None
 # ==========================================
-# 8. MAIN WORKFLOW (Crash-Proof & Batching)
+# 8. MAIN WORKFLOW (Memory-Safe & Bulletproof)
 # ==========================================
 def main_workflow():
     # 🌟 MASTER TRY-CATCH BLOCK STARTS HERE
     try:
         pdf_path = "book.pdf"
         
-        # 1. Download Step with Try/Except Safety
+        # 1. Download Step
         if not os.path.exists(pdf_path):
             print("📥 Downloading PDF...")
             try:
@@ -474,10 +474,10 @@ def main_workflow():
                 print(f"❌ CRITICAL ERROR: PDF Download Failed! {e}")
                 return
 
-        # 2. PDF Open Step with Try/Except Safety
+        # 2. PDF Open Step - (सिर्फ पेज काउंट लेने के लिए खोला और बंद कर दिया)
         try:
-            doc = fitz.open(pdf_path)
-            total_pages = doc.page_count
+            with fitz.open(pdf_path) as temp_doc:
+                total_pages = temp_doc.page_count
         except Exception as e:
             print(f"❌ CRITICAL ERROR: Failed to open PDF! {e}")
             return
@@ -493,9 +493,12 @@ def main_workflow():
                 print(f"\n📖 Pages {curr_page+1}-{next_page} | Topic: {section}")
 
                 text = ""
-                for i in range(curr_page, next_page):
-                    extracted = extract_text_with_ocr(doc, pdf_path, i)
-                    if extracted: text += extracted + "\n"
+                
+                # 🌟 MEMORY FIX: लूप के अंदर PDF खोलें, 2 पेज पढ़ें, और आटोमेटिक क्लोज कर दें!
+                with fitz.open(pdf_path) as doc:
+                    for i in range(curr_page, next_page):
+                        extracted = extract_text_with_ocr(doc, pdf_path, i)
+                        if extracted: text += extracted + "\n"
 
                 if len(text.strip()) < 50:
                     print("⚠️ Skipping blank chunk")
@@ -513,7 +516,7 @@ def main_workflow():
                             q["answer"], q["explanation"]
                         ])
                     
-                    # Batch Buffer Logic (Append every 50 questions)
+                    # Batch Buffer Logic
                     if len(buffer) >= 50:
                         sheet.append_rows(buffer, value_input_option="RAW")
                         print(f"✅ Batch Appended {len(buffer)} MCQs to Sheet")
@@ -530,17 +533,16 @@ def main_workflow():
             finally:
                 text = None
                 questions = None
-                gc.collect()
+                gc.collect() # 🧹 मेमोरी को 100% साफ़ करें
 
         # Flush remaining buffer at the end
         if len(buffer) > 0:
             sheet.append_rows(buffer, value_input_option="RAW")
             print(f"✅ Final Batch Appended {len(buffer)} MCQs to Sheet")
         
-        doc.close()
         print("🎉 ENTIRE BOOK PROCESSED SUCCESSFULLY!")
 
-    # 🌟 MASTER CATCH: Catch ANY error that slipped through!
+    # 🌟 MASTER CATCH
     except Exception as e:
         print(f"❌🔥 CRITICAL THREAD CRASH: {e}")
         import traceback
