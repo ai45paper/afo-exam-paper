@@ -28,6 +28,7 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+    print("⚠️ pdf2image or pytesseract not installed. OCR fallback disabled.")
 
 # ========================
 # LOGGING
@@ -64,21 +65,15 @@ class KeyRotation:
         self.gemini_last_used = 0
     
     def get_next_openrouter_key(self):
-        """Get next OpenRouter key with rotation"""
-        if not OPENROUTER_KEYS:
-            return None
+        if not OPENROUTER_KEYS: return None
         key = OPENROUTER_KEYS[self.openrouter_idx]
         self.openrouter_idx = (self.openrouter_idx + 1) % len(OPENROUTER_KEYS)
-        self.openrouter_last_used = time.time()
         return key
     
     def get_next_gemini_key(self):
-        """Get next Gemini key with rotation"""
-        if not GEMINI_KEYS:
-            return None
+        if not GEMINI_KEYS: return None
         key = GEMINI_KEYS[self.gemini_idx]
         self.gemini_idx = (self.gemini_idx + 1) % len(GEMINI_KEYS)
-        self.gemini_last_used = time.time()
         return key
 
 key_rotation = KeyRotation()
@@ -144,7 +139,7 @@ def extract_text_with_ocr(doc, pdf_path, page_idx):
     text = page.get_text()
     if text and len(text.strip()) > 100:
         return text
-    if not OCR_AVAILABLE or page_idx > 1200:
+    if not OCR_AVAILABLE:
         return ""
     logger.info(f"OCR on page {page_idx+1}")
     try:
@@ -171,23 +166,18 @@ Answer: Malpighian tubule
 Type of silviculture system which can regenerate through seeds and where the majority have a long life is
 Options: Pollarding | High forest | Coppicing | Forking | None
 Answer: High forest
-
-The process of removing the green colouring (known as chlorophyll) from the skin of citrus fruit by introducing measured amounts of ethylene gas is known as
-Options: Ripening | Degreening | Physiological maturity | Denavelling | Dehusking
-Answer: Degreening
 """
+    # ✅ FIX 3: Realistic Prompt (Less strict formatting rules)
     return f"""You are Satyam Sir, an expert agriculture mentor setting a mock paper for the AGTA 2026 and IBPS AFO Mains batches.
 
 YOUR TASK: Generate exactly 10 high-quality multiple-choice questions from the provided text.
 
-STRICT RULES:
+RULES:
 1. Language: 100% STRICTLY ENGLISH ONLY. No Hindi.
 2. Difficulty: Moderate level. Keep them engaging.
 3. Options: Exactly 5 options per question.
 4. Answer Match: The text in the 'answer' field MUST exactly match the text of one of the 5 options.
-5. Question Length: 20 to 35 words.
-6. Explanation: Max 20 words.
-7. Format: Return STRICT valid JSON array ONLY. NO markdown code blocks, NO extra text.
+5. Format: Return a JSON array. Do not include explanations outside JSON.
 
 Topic: {section}
 
@@ -197,14 +187,14 @@ EXPECTED JSON SCHEMA:
 [
   {{
     "section": "{section}",
-    "question": "Question text here strictly in English...",
+    "question": "Question text here...",
     "opt1": "First option text",
     "opt2": "Second option text",
     "opt3": "Third option text",
     "opt4": "Fourth option text",
     "opt5": "Fifth option text",
     "answer": "Exact text of the correct option",
-    "explanation": "Short conceptual explanation strictly in English."
+    "explanation": "Short conceptual explanation."
   }}
 ]
 
@@ -216,24 +206,41 @@ Content:
 # JSON CLEANER
 # ========================
 def extract_and_clean_json(raw):
+    # ✅ FIX 2: Robust JSON extraction
     if not raw:
         return None
-    clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE)
-    match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', clean)
-    if not match:
-        return None
+
+    raw = raw.strip()
+    
+    # ✅ FIX 7: Clean common Gemini/Claude prefixes
+    raw = re.sub(r'^(Here is your JSON:|Here is the JSON array:|```json|```)', '', raw, flags=re.IGNORECASE).strip()
+    raw = re.sub(r'```$', '', raw).strip()
+
     try:
-        data = json.loads(match.group(0))
+        # Direct parse attempt
+        data = json.loads(raw)
     except:
-        return None
+        # Fallback extraction (grab everything between first [ and last ])
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            logger.debug("Failed regex match for JSON array bounds.")
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except Exception as e:
+            logger.debug(f"JSON load failed on matched segment: {e}")
+            return None
+
     data = data[:10]
+    
     def clean_opt(opt):
         opt = str(opt).strip()
-        opt = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', opt)
+        opt = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', opt, flags=re.IGNORECASE)
         return opt.strip()
+        
     result = []
     for item in data:
-        q = item.get("question", "").strip()
+        q = str(item.get("question", "")).strip()
         opt1 = clean_opt(item.get("opt1",""))
         opt2 = clean_opt(item.get("opt2",""))
         opt3 = clean_opt(item.get("opt3",""))
@@ -241,10 +248,22 @@ def extract_and_clean_json(raw):
         opt5 = clean_opt(item.get("opt5",""))
         ans = clean_opt(item.get("answer",""))
         expl = str(item.get("explanation","")).strip()
+        
         if not q or not ans:
             continue
-        if ans.lower() not in [opt1.lower(), opt2.lower(), opt3.lower(), opt4.lower(), opt5.lower()]:
-            continue
+            
+        # Flexible answer validation
+        valid_options = [opt1.lower(), opt2.lower(), opt3.lower(), opt4.lower(), opt5.lower()]
+        if ans.lower() not in valid_options:
+            matched = False
+            for v_opt in valid_options:
+                if ans.lower() in v_opt or v_opt in ans.lower():
+                    matched = True
+                    break
+            if not matched:
+                logger.debug(f"Question rejected: Answer '{ans}' not in options.")
+                continue
+                
         result.append({
             "section": str(item.get("section","")).strip() or "General Agriculture",
             "question": q,
@@ -259,12 +278,10 @@ def extract_and_clean_json(raw):
 # ========================
 
 def call_openrouter(prompt):
-    """Call OpenRouter API with key rotation"""
     key = key_rotation.get_next_openrouter_key()
-    if not key:
-        return None
+    if not key: return None
     models = ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet"]
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
     for model in models:
         try:
             resp = requests.post(url, 
@@ -274,18 +291,14 @@ def call_openrouter(prompt):
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
             if resp.status_code == 429:
-                logger.debug(f"OpenRouter 429 - moving to next provider")
                 break
-        except Exception as e:
-            logger.debug(f"OpenRouter error: {e}")
+        except:
             continue
     return None
 
 def call_nvidia(prompt):
-    """Call NVIDIA API"""
-    if not NVIDIA_KEY:
-        return None
-    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+    if not NVIDIA_KEY: return None
+    url = "[https://integrate.api.nvidia.com/v1/chat/completions](https://integrate.api.nvidia.com/v1/chat/completions)"
     models = ["nvidia/nemotron-4-340b-instruct", "meta/llama3-70b-instruct"]
     for model in models:
         try:
@@ -295,15 +308,12 @@ def call_nvidia(prompt):
                 timeout=30)
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.debug(f"NVIDIA error: {e}")
+        except:
             continue
     return None
 
 def call_claude(prompt):
-    """Call Claude API"""
-    if not CLAUDE_KEY:
-        return None
+    if not CLAUDE_KEY: return None
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
         response = client.messages.create(
@@ -313,40 +323,36 @@ def call_claude(prompt):
             messages=[{"role": "user", "content": prompt}]
         )
         return response.content[0].text
-    except Exception as e:
-        logger.debug(f"Claude error: {e}")
+    except:
         return None
 
 def call_gemini(prompt):
-    """Call Gemini API with key rotation"""
     key = key_rotation.get_next_gemini_key()
-    if not key:
-        return None
+    if not key: return None
     models = ["gemini-2.5-flash", "gemini-2.0-flash"]
     for model_name in models:
         try:
             genai.configure(api_key=key)
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(
-                prompt + "\n\nReturn STRICT valid JSON array only. No extra text.",
+                prompt + "\n\nReturn strictly valid JSON array only.",
                 generation_config={"response_mime_type": "text/plain"}
             )
             if response and response.text:
                 return response.text
         except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "quota" in error_str.lower():
-                logger.debug(f"Gemini quota exceeded, trying next key")
+            if "429" in str(e) or "quota" in str(e).lower():
                 continue
-            logger.debug(f"Gemini error: {e}")
             continue
     return None
 
 def generate_questions(text, section):
-    """
-    Generate questions with smart provider fallback.
-    Order: OpenRouter (with rotation) → NVIDIA → Claude → Gemini (with rotation)
-    """
+    # ✅ FIX 4: Check Text Quality
+    word_count = len(text.split())
+    if word_count < 80:
+        logger.warning(f"Low quality/short text ({word_count} words) — skipping AI generation")
+        return None
+
     prompt = build_prompt(text, section)
     start_time = time.time()
     
@@ -357,31 +363,51 @@ def generate_questions(text, section):
         ("Gemini", call_gemini)
     ]
     
+    # ✅ FIX 6: Retry per provider
+    for attempt in range(2):
+        logger.info(f"--- Generation Attempt {attempt + 1} ---")
+        for provider_name, provider_func in providers:
+            # ✅ FIX 5: Increased Timeout
+            if time.time() - start_time > 120:
+                logger.warning("Global timeout (120s) – moving to next batch")
+                return None
+            
+            try:
+                logger.info(f"Trying {provider_name}...")
+                raw = provider_func(prompt)
+                
+                # ✅ FIX 1: Add RAW logging
+                logger.info(f"{provider_name} RAW RESPONSE (first 500 chars):\n{raw[:500] if raw else 'None'}\n---")
+                
+                if raw:
+                    cleaned = extract_and_clean_json(raw)
+                    if cleaned:
+                        logger.info(f"✓ Success with {provider_name}: {len(cleaned)} questions generated")
+                        return cleaned
+                    else:
+                        logger.warning(f"⚠️ {provider_name} response failed JSON parsing.")
+            except Exception as e:
+                logger.debug(f"{provider_name} failed: {e}")
+                continue
+                
+    # Bonus Feature: Try a shorter prompt if everything failed
+    logger.warning("All AI providers failed. Retrying with shorter prompt...")
+    short_prompt = build_prompt(text[:2000], section)
     for provider_name, provider_func in providers:
-        if time.time() - start_time > 60:
-            logger.warning("Global timeout (60s) – moving to next batch")
-            return None
-        
-        try:
-            logger.info(f"Trying {provider_name}...")
-            raw = provider_func(prompt)
-            if raw:
-                cleaned = extract_and_clean_json(raw)
-                if cleaned:
-                    logger.info(f"✓ Success with {provider_name}: {len(cleaned)} questions generated")
-                    return cleaned
-        except Exception as e:
-            logger.debug(f"{provider_name} failed: {e}")
-            continue
+         raw = provider_func(short_prompt)
+         if raw:
+             cleaned = extract_and_clean_json(raw)
+             if cleaned:
+                 logger.info(f"✓ Success on shorter prompt with {provider_name}")
+                 return cleaned
     
-    logger.warning("All AI providers failed for this batch")
+    logger.warning("❌ All AI providers failed completely for this batch")
     return None
 
 # ========================
 # GOOGLE SHEETS
 # ========================
 def append_to_sheet(rows):
-    """Append rows to Google Sheet with retry"""
     for attempt in range(3):
         try:
             sheet.append_rows(rows, value_input_option="RAW")
@@ -394,25 +420,46 @@ def append_to_sheet(rows):
     return False
 
 # ========================
-# MAIN WORKFLOW
+# MAIN WORKFLOW (STREAMING DOWNLOAD)
 # ========================
 def main_workflow():
     pdf_path = "book.pdf"
-    
+    logger.info("▶️ ENGINE STARTING...")
+
     if not os.path.exists(pdf_path):
-        logger.info("Downloading PDF from Google Drive...")
+        logger.info("📥 Streaming PDF Download (117MB) in chunks...")
         try:
-            gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
+            download_url = "".join(["https://", "drive.google.com", "/uc?id=", DRIVE_FILE_ID, "&export=download"])
+            session = requests.Session()
+            response = session.get(download_url, stream=True)
+            
+            if "confirm=" not in download_url and response.text.find("confirm=") != -1:
+                match = re.search(r'confirm=([a-zA-Z0-9_-]+)', response.text)
+                if match:
+                    token = match.group(1)
+                    download_url += f"&confirm={token}"
+                    response = session.get(download_url, stream=True)
+
+            with open(pdf_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024 * 1024): 
+                    if chunk: f.write(chunk)
+                    
             if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
-                raise Exception("Empty download")
-            logger.info("✅ PDF downloaded")
+                raise Exception("Downloaded file is empty or missing.")
+            logger.info("✅ PDF Streaming Saved to Disk.")
+            gc.collect()
+            time.sleep(3)
         except Exception as e:
-            logger.error(f"Download failed: {e}")
+            logger.error(f"❌ PDF download failed: {e}")
             return
 
-    with fitz.open(pdf_path) as doc:
-        total_pages = doc.page_count
-    logger.info(f"📄 Total PDF pages: {total_pages}")
+    try:
+        with fitz.open(pdf_path) as doc:
+            total_pages = doc.page_count
+        logger.info(f"📄 Total PDF pages: {total_pages}")
+    except Exception as e:
+        logger.error(f"❌ Cannot read PDF: {e}")
+        return
 
     current = init_tracker()
     if current >= total_pages:
@@ -426,11 +473,15 @@ def main_workflow():
         logger.info(f"📖 Processing pages {current+1}-{next_page} | {section}")
 
         combined = ""
-        with fitz.open(pdf_path) as doc:
-            for i in range(current, next_page):
-                page_text = extract_text_with_ocr(doc, pdf_path, i)
-                if page_text:
-                    combined += page_text + "\n"
+        try:
+            with fitz.open(pdf_path) as doc:
+                for i in range(current, next_page):
+                    page_text = extract_text_with_ocr(doc, pdf_path, i)
+                    if page_text:
+                        combined += page_text + "\n"
+        except Exception as e:
+             logger.error(f"Error reading pages: {e}")
+             
         combined = combined[:15000]
 
         if len(combined.strip()) > 50:
@@ -438,8 +489,10 @@ def main_workflow():
             if questions:
                 for q in questions:
                     buffer.append([
-                        q["section"], q["question"], q["opt1"], q["opt2"], q["opt3"],
-                        q["opt4"], q["opt5"], q["answer"], q["explanation"]
+                        q.get("section", section), q.get("question", ""), 
+                        q.get("opt1", ""), q.get("opt2", ""), q.get("opt3", ""),
+                        q.get("opt4", ""), q.get("opt5", ""), 
+                        q.get("answer", ""), q.get("explanation", "")
                     ])
                 if len(buffer) >= 50:
                     if append_to_sheet(buffer):
@@ -453,7 +506,6 @@ def main_workflow():
         current = next_page
         gc.collect()
         
-        # ⏱️ IMPORTANT: Proper time gap (20 seconds for rate limit protection)
         logger.info("Waiting 20 seconds before next batch (rate limit protection)...")
         time.sleep(20)
 
@@ -469,7 +521,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "AGTA 2026 Engine LIVE - Production Ready with Key Rotation ✅"
+    return "AGTA 2026 Engine LIVE - Production Ready ✅"
 
 @app.route('/health')
 def health():
