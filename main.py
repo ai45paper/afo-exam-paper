@@ -14,7 +14,8 @@ import fitz  # PyMuPDF
 import gdown
 from flask import Flask
 from threading import Thread
-import google.generativeai as genai
+from PIL import Image
+import numpy as np
 
 # ========================
 # OCR IMPORTS (with graceful fallback)
@@ -43,10 +44,9 @@ try:
 except:
     EASY_OCR = None
 
-# Fallback 2: Tesseract (via pytesseract)
+# Fallback 2: Tesseract
 try:
     import pytesseract
-    from PIL import Image
     TESSERACT_AVAILABLE = True
     if OCR_ENGINE is None:
         OCR_ENGINE = "Tesseract"
@@ -55,7 +55,7 @@ except:
 
 if OCR_ENGINE is None:
     OCR_ENGINE = "None"
-    print("⚠️ No OCR engine available – will use embedded PDF text only")
+    print("⚠️ No OCR engine available – using embedded PDF text only")
 
 # ========================
 # CONFIG & START PAGE
@@ -171,71 +171,84 @@ def get_section(page_idx):
     return "General Agriculture"
 
 # ========================
-# OCR FUNCTIONS (PaddleOCR → EasyOCR → Tesseract)
+# OCR TEXT EXTRACTION (FIXED: proper PIL conversion)
 # ========================
-def ocr_image(image):
-    """Run OCR on a PIL image using the best available engine."""
-    if PADDLE_OCR is not None:
-        try:
-            # PaddleOCR expects numpy array or image path
-            import numpy as np
-            img_np = np.array(image)
-            result = PADDLE_OCR.ocr(img_np, cls=True)
-            if result and result[0]:
-                text = "\n".join([line[1][0] for line in result[0]])
-                return text
-        except Exception as e:
-            logger.warning(f"PaddleOCR failed: {e}")
-
-    if EASY_OCR is not None:
-        try:
-            result = EASY_OCR.readtext(image, detail=0, paragraph=True)
-            return "\n".join(result)
-        except Exception as e:
-            logger.warning(f"EasyOCR failed: {e}")
-
-    if TESSERACT_AVAILABLE:
-        try:
-            return pytesseract.image_to_string(image, lang="eng")
-        except Exception as e:
-            logger.warning(f"Tesseract failed: {e}")
-
-    return ""
-
 def extract_text_from_page(pdf_path, page_idx):
-    """
-    Extract text from a single PDF page.
-    First try embedded text (fast). If too little, convert to image and use OCR.
-    """
-    # Step 1: try direct text extraction
+    """Extract text: try embedded text first, then convert to image and run OCR."""
     doc = fitz.open(pdf_path)
     page = doc.load_page(page_idx)
+    
+    # 1. Try embedded text
     text = page.get_text()
-    doc.close()
     if text and len(text.split()) > 15:
+        doc.close()
         return text
-
-    # Step 2: fallback to OCR
-    if not PDF2IMAGE_AVAILABLE:
-        return ""
-    logger.info(f"Page {page_idx+1}: low embedded text, starting OCR...")
+    
+    # 2. Fallback to OCR
+    logger.info(f"Page {page_idx+1} low text, trying OCR...")
     try:
-        images = convert_from_path(pdf_path, first_page=page_idx+1, last_page=page_idx+1, dpi=200)
-        if not images:
-            return ""
-        ocr_text = ocr_image(images[0])
-        if ocr_text and len(ocr_text.split()) > 15:
-            logger.info(f"OCR success on page {page_idx+1} using {OCR_ENGINE}")
+        # Get pixmap (image) from page with higher resolution
+        zoom = 2.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        
+        # Convert pixmap to PIL Image
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        # Run OCR with best available engine
+        ocr_text = ""
+        
+        # Try PaddleOCR first
+        if PADDLE_OCR is not None:
+            try:
+                img_np = np.array(img)
+                result = PADDLE_OCR.ocr(img_np, cls=True)
+                if result and result[0]:
+                    ocr_text = "\n".join([line[1][0] for line in result[0]])
+                    if ocr_text and len(ocr_text.split()) > 15:
+                        logger.info(f"PaddleOCR success on page {page_idx+1}")
+                        doc.close()
+                        return ocr_text
+            except Exception as e:
+                logger.warning(f"PaddleOCR failed: {e}")
+        
+        # Try EasyOCR
+        if EASY_OCR is not None and not ocr_text:
+            try:
+                result = EASY_OCR.readtext(np.array(img), detail=0, paragraph=True)
+                ocr_text = "\n".join(result)
+                if ocr_text and len(ocr_text.split()) > 15:
+                    logger.info(f"EasyOCR success on page {page_idx+1}")
+                    doc.close()
+                    return ocr_text
+            except Exception as e:
+                logger.warning(f"EasyOCR failed: {e}")
+        
+        # Try Tesseract
+        if TESSERACT_AVAILABLE and not ocr_text:
+            try:
+                ocr_text = pytesseract.image_to_string(img, lang="eng")
+                if ocr_text and len(ocr_text.split()) > 15:
+                    logger.info(f"Tesseract success on page {page_idx+1}")
+                    doc.close()
+                    return ocr_text
+            except Exception as e:
+                logger.warning(f"Tesseract failed: {e}")
+        
+        doc.close()
+        if len(ocr_text.split()) > 15:
             return ocr_text
         else:
             logger.warning(f"OCR produced too little text on page {page_idx+1}")
             return ""
+            
     except Exception as e:
-        logger.error(f"Page {page_idx+1} OCR failed: {e}")
+        doc.close()
+        logger.error(f"OCR error on page {page_idx+1}: {e}")
         return ""
 
 # ========================
-# PROMPT (RELAXED)
+# PROMPT BUILDING (RELAXED)
 # ========================
 def build_prompt(text, section):
     examples = """
@@ -426,6 +439,7 @@ def call_gemini(prompt):
             continue
         for model_name in models:
             try:
+                import google.generativeai as genai
                 genai.configure(api_key=key)
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(
@@ -532,7 +546,6 @@ def main_workflow():
             page_text = extract_text_from_page(pdf_path, i)
             if page_text:
                 combined += page_text + "\n"
-            # aggressive garbage collect between pages
             gc.collect()
         combined = combined[:15000]
 
@@ -569,7 +582,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "AGTA 2026 Engine - PaddleOCR+EasyOCR, start page 975 ✅"
+    return "AGTA 2026 Engine - OCR Fixed, Start Page 975 ✅"
 
 @app.route('/health')
 def health():
