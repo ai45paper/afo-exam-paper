@@ -17,33 +17,27 @@ import google.generativeai as genai
 import anthropic
 
 # ========================
-# HARDCODED START PAGE (1‑BASED)
-# Yahan jo number likhoge wahi page se start hoga
-# Example: 966 means page number 966
+# HARDCODED START PAGE (1‑BASED) – CHANGE HERE
 # ========================
-START_PAGE_1BASED = 970   # page 970 se start hoga
-START_PAGE_0BASED = START_PAGE_1BASED - 1   # 0‑based for code
+START_PAGE_1BASED = 970   # <-- Set to 970
+START_PAGE_0BASED = START_PAGE_1BASED - 1
 
-# Optional OCR (will be skipped if not installed)
+# Optional OCR (skip if not installed)
 try:
     from pdf2image import convert_from_path
     import pytesseract
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
-    print("⚠️ OCR not available – text extraction from PDF only")
 
 # ========================
-# LOGGING SETUP
+# LOGGING
 # ========================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ========================
-# ENVIRONMENT VARIABLES (must be set on Render)
+# ENVIRONMENT VARIABLES (set these on Render)
 # ========================
 CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 NVIDIA_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
@@ -55,16 +49,14 @@ SHEET_ID = os.getenv("SHEET_ID", "").strip()
 DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "").strip()
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
 
-# Optional Poppler path for OCR (default /usr/bin)
 POPPLER_PATH = os.getenv("POPPLER_PATH", "/usr/bin")
 
-# Validate mandatory vars
 if not MONGO_URI or not SHEET_ID or not DRIVE_FILE_ID or not SERVICE_ACCOUNT_JSON:
-    logger.error("Missing required environment variables (MONGO_URI, SHEET_ID, DRIVE_FILE_ID, SERVICE_ACCOUNT_JSON). Exiting.")
+    logger.error("Missing required env vars")
     sys.exit(1)
 
 # ========================
-# SECTION RANGES (1‑BASED)
+# SECTION RANGES (1‑based)
 # ========================
 SECTION_RANGES = [
     (1, 75, "Agronomy"), (76, 242, "Horticulture"), (243, 308, "Entomology"),
@@ -83,7 +75,7 @@ SECTION_RANGES = [
 logger.info("Connecting to MongoDB...")
 mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 try:
-    mongo_client.server_info()   # force connection check
+    mongo_client.server_info()
 except Exception as e:
     logger.error(f"MongoDB connection failed: {e}")
     sys.exit(1)
@@ -98,13 +90,12 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ========================
-# TRACKER – ALWAYS START FROM HARDCODED PAGE
+# TRACKER – FORCE START FROM HARDCODED PAGE
 # ========================
 def init_tracker():
-    """Force start from hardcoded page – ignore any previous progress."""
     last = START_PAGE_0BASED
     update_tracker(last)
-    logger.info(f"🚀 Hardcoded start: page {last+1} (1‑based)")
+    logger.info(f"Forced start from page {last+1} (hardcoded)")
     return last
 
 def update_tracker(page_idx):
@@ -118,17 +109,16 @@ def get_section(page_idx):
     return "General Agriculture"
 
 # ========================
-# TEXT EXTRACTION (with OCR fallback but limited)
+# TEXT EXTRACTION (with limited OCR)
 # ========================
 def extract_text_with_ocr(doc, pdf_path, page_idx):
     page = doc.load_page(page_idx)
     text = page.get_text()
     if text and len(text.strip()) > 100:
         return text
-    # Skip OCR on very high pages (>1200) or if OCR not available
     if not OCR_AVAILABLE or page_idx > 1200:
         return ""
-    logger.info(f"🔍 OCR on page {page_idx+1}")
+    logger.info(f"OCR on page {page_idx+1}")
     try:
         images = convert_from_path(pdf_path, first_page=page_idx+1, last_page=page_idx+1, dpi=200, poppler_path=POPPLER_PATH)
         ocr_text = ""
@@ -140,7 +130,7 @@ def extract_text_with_ocr(doc, pdf_path, page_idx):
         return ""
 
 # ========================
-# PROMPT FOR QUESTION GENERATION
+# PROMPT BUILDING
 # ========================
 def build_prompt(text, section):
     examples = """
@@ -169,7 +159,7 @@ STRICT RULES:
 4. Answer Match: The text in the 'answer' field MUST exactly match the text of one of the 5 options.
 5. Question Length: 20 to 35 words.
 6. Explanation: Max 20 words.
-7. Format: Return STRICT valid JSON array ONLY. NO markdown code blocks, NO extra text, NO explanation before/after.
+7. Format: Return STRICT valid JSON array ONLY. NO markdown code blocks, NO extra text.
 
 Topic: {section}
 
@@ -195,14 +185,12 @@ Content:
 """
 
 # ========================
-# JSON PARSER (robust)
+# JSON CLEANER
 # ========================
 def extract_and_clean_json(raw):
     if not raw:
         return None
-    # Remove markdown code blocks
     clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE)
-    # Find first JSON array
     match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', clean)
     if not match:
         return None
@@ -239,10 +227,9 @@ def extract_and_clean_json(raw):
     return result if result else None
 
 # ========================
-# API CALLS WITH ORDER: OPENROUTER -> NVIDIA -> GEMINI -> CLAUDE
+# AI PROVIDERS (Order: OpenRouter -> NVIDIA -> Gemini -> Claude)
 # ========================
 
-# ---------- 1. OPENROUTER (3 keys, auto model) ----------
 def call_openrouter(prompt):
     if not OPENROUTER_KEYS:
         return None
@@ -251,21 +238,16 @@ def call_openrouter(prompt):
     for key in OPENROUTER_KEYS:
         for model in models:
             try:
-                resp = requests.post(
-                    url,
-                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-                    timeout=30
-                )
+                resp = requests.post(url, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                                     json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
                 if resp.status_code == 200:
                     return resp.json()["choices"][0]["message"]["content"]
                 if resp.status_code == 429:
-                    break  # quota full, try next key
-            except Exception:
+                    break
+            except:
                 continue
     return None
 
-# ---------- 2. NVIDIA (best for MCQs) ----------
 def call_nvidia(prompt):
     if not NVIDIA_KEY:
         return None
@@ -273,19 +255,14 @@ def call_nvidia(prompt):
     models = ["nvidia/nemotron-4-340b-instruct", "meta/llama3-70b-instruct"]
     for model in models:
         try:
-            resp = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-                timeout=30
-            )
+            resp = requests.post(url, headers={"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"},
+                                 json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
-        except Exception:
+        except:
             continue
     return None
 
-# ---------- 3. GEMINI (9 keys, models: 2.5-flash and 2.0-flash) ----------
 def call_gemini(prompt):
     if not GEMINI_KEYS:
         return None
@@ -303,16 +280,15 @@ def call_gemini(prompt):
                     return response.text
             except Exception as e:
                 if "429" in str(e):
-                    break  # quota exhaust, next key
+                    break  # quota full, try next key
                 continue
     return None
 
-# ---------- 4. CLAUDE (best: sonnet 20241022) ----------
 def call_claude(prompt):
     if not CLAUDE_KEY:
         return None
     try:
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY, proxies=None)
+        client = anthropic.Anthropic(api_key=CLAUDE_KEY)   # No proxies argument
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=2500,
@@ -323,6 +299,23 @@ def call_claude(prompt):
     except Exception as e:
         logger.warning(f"Claude error: {e}")
         return None
+
+def generate_questions(text, section):
+    prompt = build_prompt(text, section)
+    start_time = time.time()
+    # Order: OpenRouter -> NVIDIA -> Gemini -> Claude
+    for func in [call_openrouter, call_nvidia, call_gemini, call_claude]:
+        if time.time() - start_time > 60:
+            logger.warning("Global timeout (60s) – moving to next batch")
+            return None
+        raw = func(prompt)
+        if raw:
+            cleaned = extract_and_clean_json(raw)
+            if cleaned:
+                return cleaned
+    logger.warning("All AI providers failed for this batch")
+    return None
+
 # ========================
 # GOOGLE SHEETS WRITE WITH RETRY
 # ========================
@@ -330,12 +323,12 @@ def append_to_sheet(rows):
     for attempt in range(3):
         try:
             sheet.append_rows(rows, value_input_option="RAW")
-            logger.info(f"✅ Appended {len(rows)} rows to Google Sheets")
+            logger.info(f"Appended {len(rows)} rows to Google Sheets")
             return True
         except Exception as e:
             logger.warning(f"Sheets write attempt {attempt+1} failed: {e}")
             time.sleep(5 * (attempt + 1))
-    logger.error("❌ Failed to write to Google Sheets after 3 retries")
+    logger.error("Failed to write to Google Sheets after 3 retries")
     return False
 
 # ========================
@@ -343,25 +336,22 @@ def append_to_sheet(rows):
 # ========================
 def main_workflow():
     pdf_path = "book.pdf"
-    
-    # Download PDF if not present
     if not os.path.exists(pdf_path):
-        logger.info("📥 Downloading PDF from Google Drive...")
+        logger.info("Downloading PDF from Google Drive...")
         try:
             gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
             if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
-                raise Exception("Downloaded file is empty")
-            logger.info("✅ PDF downloaded")
+                raise Exception("Empty download")
+            logger.info("PDF downloaded")
         except Exception as e:
             logger.error(f"Download failed: {e}")
             return
 
-    # Get total pages
     with fitz.open(pdf_path) as doc:
         total_pages = doc.page_count
-    logger.info(f"📄 Total PDF pages: {total_pages}")
+    logger.info(f"Total PDF pages: {total_pages}")
 
-    current = init_tracker()   # starts from hardcoded page 966
+    current = init_tracker()
     if current >= total_pages:
         logger.info("Already completed")
         return
@@ -370,7 +360,7 @@ def main_workflow():
     while current < total_pages:
         next_page = min(current + 2, total_pages)
         section = get_section(current)
-        logger.info(f"📖 Processing pages {current+1}-{next_page} | {section}")
+        logger.info(f"Processing pages {current+1}-{next_page} | {section}")
 
         combined = ""
         with fitz.open(pdf_path) as doc:
@@ -378,8 +368,7 @@ def main_workflow():
                 page_text = extract_text_with_ocr(doc, pdf_path, i)
                 if page_text:
                     combined += page_text + "\n"
-        # Memory safety: keep only first 15000 chars
-        combined = combined[:15000]
+        combined = combined[:15000]   # memory safe
 
         if len(combined.strip()) > 50:
             questions = generate_questions(combined, section)
@@ -400,27 +389,26 @@ def main_workflow():
         update_tracker(next_page)
         current = next_page
         gc.collect()
-        time.sleep(8)   # rate limiting
+        time.sleep(15)   # increased to avoid rate limits
 
     if buffer:
         append_to_sheet(buffer)
-    logger.info("🎉 All pages processed successfully!")
+    logger.info("All pages processed successfully!")
 
 # ========================
-# FLASK SERVER (for health checks)
+# FLASK SERVER
 # ========================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "AGTA 2026 Engine LIVE – Hardcoded start from page 966"
+    return "AGTA 2026 Engine LIVE – Hardcoded start from page 970"
 
 @app.route('/health')
 def health():
     return "OK", 200
 
 if __name__ == "__main__":
-    # Run the workflow in a background thread
     Thread(target=main_workflow, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
