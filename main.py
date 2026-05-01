@@ -9,7 +9,7 @@ import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
-import fitz  # PyMuPDF
+import fitz
 import gdown
 from flask import Flask
 from threading import Thread
@@ -17,12 +17,11 @@ import google.generativeai as genai
 import anthropic
 
 # ========================
-# HARDCODED START PAGE (1‑BASED) – CHANGE HERE
+# CONFIG
 # ========================
-START_PAGE_1BASED = 970   # <-- Set to 970
+START_PAGE_1BASED = 970
 START_PAGE_0BASED = START_PAGE_1BASED - 1
 
-# Optional OCR (skip if not installed)
 try:
     from pdf2image import convert_from_path
     import pytesseract
@@ -37,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ========================
-# ENVIRONMENT VARIABLES (set these on Render)
+# ENV VARIABLES
 # ========================
 CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 NVIDIA_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
@@ -48,7 +47,6 @@ MONGO_URI = os.getenv("MONGO_URI", "").strip()
 SHEET_ID = os.getenv("SHEET_ID", "").strip()
 DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "").strip()
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
-
 POPPLER_PATH = os.getenv("POPPLER_PATH", "/usr/bin")
 
 if not MONGO_URI or not SHEET_ID or not DRIVE_FILE_ID or not SERVICE_ACCOUNT_JSON:
@@ -56,7 +54,37 @@ if not MONGO_URI or not SHEET_ID or not DRIVE_FILE_ID or not SERVICE_ACCOUNT_JSO
     sys.exit(1)
 
 # ========================
-# SECTION RANGES (1‑based)
+# KEY ROTATION TRACKING
+# ========================
+class KeyRotation:
+    def __init__(self):
+        self.openrouter_idx = 0
+        self.gemini_idx = 0
+        self.openrouter_last_used = 0
+        self.gemini_last_used = 0
+    
+    def get_next_openrouter_key(self):
+        """Get next OpenRouter key with rotation"""
+        if not OPENROUTER_KEYS:
+            return None
+        key = OPENROUTER_KEYS[self.openrouter_idx]
+        self.openrouter_idx = (self.openrouter_idx + 1) % len(OPENROUTER_KEYS)
+        self.openrouter_last_used = time.time()
+        return key
+    
+    def get_next_gemini_key(self):
+        """Get next Gemini key with rotation"""
+        if not GEMINI_KEYS:
+            return None
+        key = GEMINI_KEYS[self.gemini_idx]
+        self.gemini_idx = (self.gemini_idx + 1) % len(GEMINI_KEYS)
+        self.gemini_last_used = time.time()
+        return key
+
+key_rotation = KeyRotation()
+
+# ========================
+# SECTION RANGES
 # ========================
 SECTION_RANGES = [
     (1, 75, "Agronomy"), (76, 242, "Horticulture"), (243, 308, "Entomology"),
@@ -90,7 +118,7 @@ gsheet_client = gspread.authorize(creds)
 sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 
 # ========================
-# TRACKER – FORCE START FROM HARDCODED PAGE
+# TRACKER
 # ========================
 def init_tracker():
     last = START_PAGE_0BASED
@@ -109,7 +137,7 @@ def get_section(page_idx):
     return "General Agriculture"
 
 # ========================
-# TEXT EXTRACTION (with limited OCR)
+# TEXT EXTRACTION
 # ========================
 def extract_text_with_ocr(doc, pdf_path, page_idx):
     page = doc.load_page(page_idx)
@@ -227,29 +255,30 @@ def extract_and_clean_json(raw):
     return result if result else None
 
 # ========================
-# AI PROVIDERS (Order: OpenRouter -> NVIDIA -> Claude -> Gemini)
+# AI PROVIDERS WITH KEY ROTATION
 # ========================
 
 def call_openrouter(prompt):
-    """Call OpenRouter API"""
-    if not OPENROUTER_KEYS:
+    """Call OpenRouter API with key rotation"""
+    key = key_rotation.get_next_openrouter_key()
+    if not key:
         return None
     models = ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet"]
     url = "https://openrouter.ai/api/v1/chat/completions"
-    for key in OPENROUTER_KEYS:
-        for model in models:
-            try:
-                resp = requests.post(url, 
-                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "user", "content": prompt}]}, 
-                    timeout=30)
-                if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
-                if resp.status_code == 429:
-                    break
-            except Exception as e:
-                logger.debug(f"OpenRouter error: {e}")
-                continue
+    for model in models:
+        try:
+            resp = requests.post(url, 
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}]}, 
+                timeout=30)
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"]
+            if resp.status_code == 429:
+                logger.debug(f"OpenRouter 429 - moving to next provider")
+                break
+        except Exception as e:
+            logger.debug(f"OpenRouter error: {e}")
+            continue
     return None
 
 def call_nvidia(prompt):
@@ -272,11 +301,10 @@ def call_nvidia(prompt):
     return None
 
 def call_claude(prompt):
-    """Call Claude API (FIXED: removed proxies argument)"""
+    """Call Claude API"""
     if not CLAUDE_KEY:
         return None
     try:
-        # ✅ FIX: Removed proxies argument - it's not supported in newer versions
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
@@ -290,45 +318,43 @@ def call_claude(prompt):
         return None
 
 def call_gemini(prompt):
-    """Call Gemini API (with quota handling)"""
-    if not GEMINI_KEYS:
+    """Call Gemini API with key rotation"""
+    key = key_rotation.get_next_gemini_key()
+    if not key:
         return None
     models = ["gemini-2.5-flash", "gemini-2.0-flash"]
-    for key in GEMINI_KEYS:
-        for model_name in models:
-            try:
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    prompt + "\n\nReturn STRICT valid JSON array only. No extra text.",
-                    generation_config={"response_mime_type": "text/plain"}
-                )
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                error_str = str(e)
-                # ✅ FIX: Handle quota (429) gracefully, don't retry immediately
-                if "429" in error_str or "quota" in error_str.lower():
-                    logger.debug(f"Gemini quota exceeded, skipping")
-                    break  # Skip this key, try next
-                logger.debug(f"Gemini error: {e}")
+    for model_name in models:
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(
+                prompt + "\n\nReturn STRICT valid JSON array only. No extra text.",
+                generation_config={"response_mime_type": "text/plain"}
+            )
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "quota" in error_str.lower():
+                logger.debug(f"Gemini quota exceeded, trying next key")
                 continue
+            logger.debug(f"Gemini error: {e}")
+            continue
     return None
 
 def generate_questions(text, section):
     """
-    Generate questions by calling AI providers in order.
-    Order: OpenRouter -> NVIDIA -> Claude -> Gemini (Gemini last due to quota limits)
+    Generate questions with smart provider fallback.
+    Order: OpenRouter (with rotation) → NVIDIA → Claude → Gemini (with rotation)
     """
     prompt = build_prompt(text, section)
     start_time = time.time()
     
-    # ✅ FIXED: Changed order - put Gemini last (it has quota limits)
     providers = [
         ("OpenRouter", call_openrouter),
         ("NVIDIA", call_nvidia),
         ("Claude", call_claude),
-        ("Gemini", call_gemini)  # Last because free tier has limits
+        ("Gemini", call_gemini)
     ]
     
     for provider_name, provider_func in providers:
@@ -352,10 +378,10 @@ def generate_questions(text, section):
     return None
 
 # ========================
-# GOOGLE SHEETS WRITE WITH RETRY
+# GOOGLE SHEETS
 # ========================
 def append_to_sheet(rows):
-    """Append rows to Google Sheet with retry logic"""
+    """Append rows to Google Sheet with retry"""
     for attempt in range(3):
         try:
             sheet.append_rows(rows, value_input_option="RAW")
@@ -373,7 +399,6 @@ def append_to_sheet(rows):
 def main_workflow():
     pdf_path = "book.pdf"
     
-    # Download PDF if not exists
     if not os.path.exists(pdf_path):
         logger.info("Downloading PDF from Google Drive...")
         try:
@@ -385,34 +410,29 @@ def main_workflow():
             logger.error(f"Download failed: {e}")
             return
 
-    # Get total pages
     with fitz.open(pdf_path) as doc:
         total_pages = doc.page_count
     logger.info(f"📄 Total PDF pages: {total_pages}")
 
-    # Initialize tracker and get starting page
     current = init_tracker()
     if current >= total_pages:
         logger.info("Already completed")
         return
 
-    # Process pages in batches
     buffer = []
     while current < total_pages:
         next_page = min(current + 2, total_pages)
         section = get_section(current)
         logger.info(f"📖 Processing pages {current+1}-{next_page} | {section}")
 
-        # Extract text from pages
         combined = ""
         with fitz.open(pdf_path) as doc:
             for i in range(current, next_page):
                 page_text = extract_text_with_ocr(doc, pdf_path, i)
                 if page_text:
                     combined += page_text + "\n"
-        combined = combined[:15000]   # memory safe
+        combined = combined[:15000]
 
-        # Generate questions if we have enough text
         if len(combined.strip()) > 50:
             questions = generate_questions(combined, section)
             if questions:
@@ -429,13 +449,14 @@ def main_workflow():
         else:
             logger.warning(f"Insufficient text on pages {current+1}-{next_page}")
 
-        # Update tracker and move to next batch
         update_tracker(next_page)
         current = next_page
         gc.collect()
-        time.sleep(15)   # Delay to avoid rate limits
+        
+        # ⏱️ IMPORTANT: Proper time gap (20 seconds for rate limit protection)
+        logger.info("Waiting 20 seconds before next batch (rate limit protection)...")
+        time.sleep(20)
 
-    # Flush remaining buffer
     if buffer:
         append_to_sheet(buffer)
     
@@ -448,7 +469,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "AGTA 2026 Engine LIVE – Hardcoded start from page 970 (FIXED)"
+    return "AGTA 2026 Engine LIVE - Production Ready with Key Rotation ✅"
 
 @app.route('/health')
 def health():
