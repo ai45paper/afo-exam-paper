@@ -113,8 +113,11 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 # ========================
 # TRACKER (SMART RESUME)
 # ========================
+# 🌟 हमने ट्रैकर का नाम बदल दिया है ताकि पुराना 1076 वाला डेटा इग्नोर हो जाए
+TRACKER_NAME = "pdf_tracker_v2" 
+
 def init_tracker():
-    tracker = tracker_col.find_one({"_id": "pdf_tracker"})
+    tracker = tracker_col.find_one({"_id": TRACKER_NAME})
     db_page = tracker.get("current_page", 0) if tracker else 0
     
     if db_page > START_PAGE_0BASED:
@@ -126,7 +129,7 @@ def init_tracker():
         return START_PAGE_0BASED
 
 def update_tracker(page_idx):
-    tracker_col.update_one({"_id": "pdf_tracker"}, {"$set": {"current_page": page_idx}}, upsert=True)
+    tracker_col.update_one({"_id": TRACKER_NAME}, {"$set": {"current_page": page_idx}}, upsert=True)
 
 def get_section(page_idx):
     human = page_idx + 1
