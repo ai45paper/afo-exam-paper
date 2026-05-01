@@ -133,14 +133,16 @@ def extract_text(doc, page_idx):
     try:
         page = doc.load_page(page_idx)
         text = page.get_text()
-        if text and len(text.split()) > 50:
+        
+        # 50 words की लिमिट को घटाकर 15 कर दिया गया है
+        if text and len(text.split()) > 15: 
             return text
-        logger.warning(f"Page {page_idx+1} has very little text. Skipping to avoid bad AI generation.")
+            
+        logger.warning(f"Page {page_idx+1} has very little text (less than 15 words). Skipping.")
         return ""
     except Exception as e:
         logger.error(f"Failed to read page {page_idx+1}: {e}")
         return ""
-
 # ========================
 # PROMPT BUILDING
 # ========================
