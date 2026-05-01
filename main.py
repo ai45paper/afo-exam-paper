@@ -254,111 +254,222 @@ def extract_and_clean_json(raw):
         })
     return result if result else None
 
+import random
+
 # ========================
-# AI PROVIDERS (URLS FIXED)
+# AI PROVIDERS (FINAL FIXED)
 # ========================
+
 def call_openrouter(prompt):
-    key = key_rotation.get_next_openrouter_key()
-    if not key: return None
-    # ✅ FIX 1: URL FIXED (No Markdown brackets)
-    url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
-    for model in ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet"]:
-        try:
-            resp = requests.post(url, headers={"Authorization": f"Bearer {key}"}, json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
-            if resp.status_code == 200: return resp.json()["choices"][0]["message"]["content"]
-            if resp.status_code == 429: break
-        except Exception as e:
-            logger.error(f"OpenRouter Error ({model}): {e}")
-            continue
+    # ✅ CORRECT URL (NO BRACKETS)
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    
+    for _ in range(len(OPENROUTER_KEYS)):  # rotate all keys
+        key = key_rotation.get_next_openrouter_key()
+        if not key:
+            return None
+
+        for model in [
+            "openrouter/auto",
+            "meta-llama/llama-3.1-70b-instruct",
+            "anthropic/claude-3.5-sonnet"
+        ]:
+            try:
+                resp = requests.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}]
+                    },
+                    timeout=40
+                )
+
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+
+                elif resp.status_code == 429:
+                    logger.warning(f"OpenRouter rate limit on key, switching...")
+                    break  # try next key
+
+                else:
+                    logger.warning(f"OpenRouter bad response: {resp.text}")
+
+            except Exception as e:
+                logger.error(f"OpenRouter Error: {e}")
+                continue
+
     return None
+
 
 def call_nvidia(prompt):
-    if not NVIDIA_KEY: return None
-    # ✅ FIX 1: URL FIXED
-    url = "[https://integrate.api.nvidia.com/v1/chat/completions](https://integrate.api.nvidia.com/v1/chat/completions)"
-    for model in ["nvidia/nemotron-4-340b-instruct", "meta/llama3-70b-instruct"]:
-        try:
-            resp = requests.post(url, headers={"Authorization": f"Bearer {NVIDIA_KEY}"}, json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
-            if resp.status_code == 200: return resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"NVIDIA Error ({model}): {e}")
-            continue
-    return None
-
-def call_claude(prompt):
-    if not CLAUDE_KEY: return None
-    try:
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-        return client.messages.create(model="claude-3-5-sonnet-20241022", max_tokens=2500, temperature=0.4, messages=[{"role": "user", "content": prompt}]).content[0].text
-    except Exception as e:
-        logger.error(f"Claude Error: {e}")
+    if not NVIDIA_KEY:
         return None
 
-def call_gemini(prompt):
-    key = key_rotation.get_next_gemini_key()
-    if not key: return None
-    for model_name in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+
+    for model in [
+        "nvidia/nemotron-4-340b-instruct",
+        "meta/llama3-70b-instruct"
+    ]:
         try:
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel(model_name)
-            resp = model.generate_content(prompt, generation_config={"response_mime_type": "text/plain"})
-            if resp and resp.text: return resp.text
+            resp = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {NVIDIA_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=40
+            )
+
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"]
+
+            else:
+                logger.warning(f"NVIDIA bad response: {resp.text}")
+
         except Exception as e:
-            # ✅ FIX 2: Gemini logging
-            logger.error(f"Gemini Error ({model_name}): {e}")
+            logger.error(f"NVIDIA Error: {e}")
             continue
+
     return None
 
+
+def call_claude(prompt):
+    if not CLAUDE_KEY:
+        return None
+
+    url = "https://api.anthropic.com/v1/messages"
+
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "x-api-key": CLAUDE_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 2500,
+                "temperature": 0.4,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=40
+        )
+
+        if resp.status_code == 200:
+            return resp.json()["content"][0]["text"]
+
+        else:
+            logger.warning(f"Claude bad response: {resp.text}")
+
+    except Exception as e:
+        logger.error(f"Claude Error: {e}")
+
+    return None
+
+
+def call_gemini(prompt):
+    if not GEMINI_KEYS:
+        return None
+
+    # ✅ rotate all 9 keys properly
+    for _ in range(len(GEMINI_KEYS)):
+        key = key_rotation.get_next_gemini_key()
+
+        for model_name in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+            try:
+                genai.configure(api_key=key)
+
+                model = genai.GenerativeModel(model_name)
+
+                resp = model.generate_content(
+                    prompt + "\n\nReturn ONLY valid JSON array.",
+                    generation_config={"response_mime_type": "text/plain"}
+                )
+
+                if resp and resp.text:
+                    return resp.text
+
+            except Exception as e:
+                if "429" in str(e) or "quota" in str(e).lower():
+                    logger.warning("Gemini quota hit, switching key...")
+                    break  # next key
+
+                logger.error(f"Gemini Error: {e}")
+                continue
+
+    return None
+
+
 # ========================
-# ORCHESTRATOR (SHUFFLE & RETRY)
+# ORCHESTRATOR (STRONG VERSION)
 # ========================
+
 def generate_questions(text, section):
     prompt = build_prompt(text, section)
     start_time = time.time()
-    
-    # List of tuples
+
     providers = [
-        ("OpenRouter", call_openrouter), 
-        ("NVIDIA", call_nvidia), 
-        ("Claude", call_claude), 
-        ("Gemini", call_gemini)
+        ("OpenRouter", call_openrouter),
+        ("Gemini", call_gemini),  # 👈 keep gemini early (you have 9 keys)
+        ("Claude", call_claude),
+        ("NVIDIA", call_nvidia)
     ]
-    
-    # ✅ FIX 3: Strong Retry Logic with provider shuffle
-    for attempt in range(2):
+
+    for attempt in range(3):  # ✅ increased retries
         logger.info(f"--- Generation Attempt {attempt + 1} ---")
-        random.shuffle(providers) # Randomize order so we don't hit the same failing API first
-        
+
+        random.shuffle(providers)
+
         for name, func in providers:
-            if time.time() - start_time > 120: 
-                logger.warning("Global timeout (120s) – moving to next batch")
+            if time.time() - start_time > 150:
+                logger.warning("Timeout reached")
                 return None
+
             try:
                 logger.info(f"Trying {name}...")
                 raw = func(prompt)
-                
-                # ✅ ADDED: Raw response logging to debug silent failures
-                logger.info(f"{name} RAW RESPONSE (first 300 chars):\n{str(raw)[:300].replace(chr(10), ' ')}\n---")
-                
+
+                logger.info(f"{name} RAW:\n{str(raw)[:300]}\n---")
+
                 if raw:
                     cleaned = extract_and_clean_json(raw)
                     if cleaned:
-                        logger.info(f"✓ Success: {len(cleaned)} MCQs")
+                        logger.info(f"✅ SUCCESS via {name}: {len(cleaned)} questions")
                         return cleaned
                     else:
-                        logger.warning(f"⚠️ {name} output rejected by cleaner.")
-                time.sleep(2) # Prevent rapid-fire API ban
+                        logger.warning(f"{name} output rejected by cleaner")
+
+                time.sleep(3)
+
             except Exception as e:
-                logger.error(f"{name} execution crashed: {e}")
+                logger.error(f"{name} crashed: {e}")
                 continue
-            
-    logger.warning("All AI providers failed. Trying shorter prompt...")
+
+    # 🔥 FINAL FALLBACK (SHORT PROMPT)
+    logger.warning("Retrying with short prompt...")
     short_prompt = build_prompt(text[:2000], section)
+
     for name, func in providers:
-         raw = func(short_prompt)
-         if raw:
-             cleaned = extract_and_clean_json(raw)
-             if cleaned: return cleaned
+        try:
+            raw = func(short_prompt)
+            if raw:
+                cleaned = extract_and_clean_json(raw)
+                if cleaned:
+                    return cleaned
+        except:
+            continue
+
+    logger.error("❌ ALL PROVIDERS FAILED")
     return None
 
 # ========================
