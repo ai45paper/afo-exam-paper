@@ -9,15 +9,14 @@ import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from pymongo import MongoClient
-import fitz
-import gdown
+import fitz  # PyMuPDF
 from flask import Flask
 from threading import Thread
 import google.generativeai as genai
 import anthropic
 
 # ========================
-# CONFIG
+# CONFIG & START PAGE
 # ========================
 START_PAGE_1BASED = 970
 START_PAGE_0BASED = START_PAGE_1BASED - 1
@@ -42,7 +41,7 @@ DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "").strip()
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
 
 if not MONGO_URI or not SHEET_ID or not DRIVE_FILE_ID or not SERVICE_ACCOUNT_JSON:
-    logger.error("Missing required env vars")
+    logger.error("❌ Missing required env vars. Exiting.")
     sys.exit(1)
 
 # ========================
@@ -108,7 +107,6 @@ def init_tracker():
     tracker = tracker_col.find_one({"_id": "pdf_tracker"})
     db_page = tracker.get("current_page", 0) if tracker else 0
     
-    # अगर DB में पेज नंबर हार्डकोडेड पेज से बड़ा है, तो DB वाला यूज़ करें (ताकि बार-बार पीछे न जाए)
     if db_page > START_PAGE_0BASED:
         logger.info(f"✅ Resuming from page {db_page+1} (MongoDB tracked)")
         return db_page
@@ -128,18 +126,19 @@ def get_section(page_idx):
     return "General Agriculture"
 
 # ========================
-# TEXT EXTRACTION (NO OCR = NO CRASH)
+# TEXT EXTRACTION (NO OCR)
 # ========================
 def extract_text(doc, page_idx):
-    page = doc.load_page(page_idx)
-    text = page.get_text()
-    
-    # अगर पेज में 50 से कम शब्द हैं, तो उसे डायग्राम या ब्लैंक समझ कर छोड़ दें
-    if text and len(text.split()) > 50:
-        return text
-        
-    logger.warning(f"Page {page_idx+1} has very little text. Skipping to avoid bad AI generation.")
-    return ""
+    try:
+        page = doc.load_page(page_idx)
+        text = page.get_text()
+        if text and len(text.split()) > 50:
+            return text
+        logger.warning(f"Page {page_idx+1} has very little text. Skipping to avoid bad AI generation.")
+        return ""
+    except Exception as e:
+        logger.error(f"Failed to read page {page_idx+1}: {e}")
+        return ""
 
 # ========================
 # PROMPT BUILDING
@@ -198,10 +197,9 @@ def extract_and_clean_json(raw):
         return None
 
     raw = raw.strip()
-    # ✅ FIX: Using double quotes to prevent 'unterminated string literal' error during copy-paste
+    # ✅ SYNTAX ERROR FIXED HERE (Using double quotes for regex string)
     raw = re.sub(r"^(Here is your JSON:|Here is the JSON array:|```json|```)", "", raw, flags=re.IGNORECASE).strip()
-    raw = re.sub(r"
-```$", "", raw).strip()
+    raw = re.sub(r"```$", "", raw).strip()
 
     try:
         data = json.loads(raw)
@@ -339,7 +337,7 @@ def generate_questions(text, section):
                 raw = provider_func(prompt)
                 
                 if raw:
-                    logger.info(f"{provider_name} RAW RESPONSE (first 300 chars):\n{raw[:300]}\n---")
+                    logger.info(f"{provider_name} RAW RESPONSE (first 200 chars):\n{raw[:200]}\n---")
                     cleaned = extract_and_clean_json(raw)
                     if cleaned:
                         logger.info(f"✓ Success with {provider_name}: {len(cleaned)} questions generated")
@@ -378,21 +376,36 @@ def append_to_sheet(rows):
     return False
 
 # ========================
-# MAIN WORKFLOW
+# MAIN WORKFLOW (STREAMING DOWNLOAD)
 # ========================
 def main_workflow():
     pdf_path = "book.pdf"
     logger.info("▶️ ENGINE STARTING...")
 
-    # GDOWN is back because streaming was downloading an HTML warning page
     if not os.path.exists(pdf_path):
-        logger.info("📥 Downloading PDF (117MB) using gdown...")
+        logger.info("📥 Streaming PDF Download (117MB) in chunks... Please wait.")
         try:
-            gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=True)
+            download_url = "".join(["https://", "drive.google.com", "/uc?id=", DRIVE_FILE_ID, "&export=download"])
+            session = requests.Session()
+            response = session.get(download_url, stream=True)
+            
+            if "confirm=" not in download_url and response.text.find("confirm=") != -1:
+                match = re.search(r'confirm=([a-zA-Z0-9_-]+)', response.text)
+                if match:
+                    token = match.group(1)
+                    download_url += f"&confirm={token}"
+                    response = session.get(download_url, stream=True)
+
+            with open(pdf_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024 * 1024): 
+                    if chunk: f.write(chunk)
+                    
             if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) < 1000000:
-                raise Exception("Downloaded file is corrupt or empty.")
-            logger.info("✅ PDF Saved to Disk.")
-            gc.collect()
+                raise Exception("Downloaded file is empty or missing.")
+                
+            logger.info("✅ PDF Streaming Saved to Disk.")
+            gc.collect() 
+            time.sleep(3) 
         except Exception as e:
             logger.error(f"❌ PDF download failed: {e}")
             return
@@ -420,7 +433,6 @@ def main_workflow():
         try:
             with fitz.open(pdf_path) as doc:
                 for i in range(current, next_page):
-                    # No OCR here anymore! Safe extraction.
                     page_text = extract_text(doc, i)
                     if page_text:
                         combined += page_text + "\n"
