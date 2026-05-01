@@ -227,10 +227,11 @@ def extract_and_clean_json(raw):
     return result if result else None
 
 # ========================
-# AI PROVIDERS (Order: OpenRouter -> NVIDIA -> Gemini -> Claude)
+# AI PROVIDERS (Order: OpenRouter -> NVIDIA -> Claude -> Gemini)
 # ========================
 
 def call_openrouter(prompt):
+    """Call OpenRouter API"""
     if not OPENROUTER_KEYS:
         return None
     models = ["openrouter/auto", "meta-llama/llama-3.1-70b-instruct", "anthropic/claude-3.5-sonnet"]
@@ -247,11 +248,12 @@ def call_openrouter(prompt):
                 if resp.status_code == 429:
                     break
             except Exception as e:
-                logger.warning(f"OpenRouter error: {e}")
+                logger.debug(f"OpenRouter error: {e}")
                 continue
     return None
 
 def call_nvidia(prompt):
+    """Call NVIDIA API"""
     if not NVIDIA_KEY:
         return None
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -265,11 +267,30 @@ def call_nvidia(prompt):
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.warning(f"NVIDIA error: {e}")
+            logger.debug(f"NVIDIA error: {e}")
             continue
     return None
 
+def call_claude(prompt):
+    """Call Claude API (FIXED: removed proxies argument)"""
+    if not CLAUDE_KEY:
+        return None
+    try:
+        # ✅ FIX: Removed proxies argument - it's not supported in newer versions
+        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=2500,
+            temperature=0.4,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text
+    except Exception as e:
+        logger.debug(f"Claude error: {e}")
+        return None
+
 def call_gemini(prompt):
+    """Call Gemini API (with quota handling)"""
     if not GEMINI_KEYS:
         return None
     models = ["gemini-2.5-flash", "gemini-2.0-flash"]
@@ -285,42 +306,29 @@ def call_gemini(prompt):
                 if response and response.text:
                     return response.text
             except Exception as e:
-                logger.warning(f"Gemini error: {e}")
-                if "429" in str(e):
-                    break  # quota full, try next key
+                error_str = str(e)
+                # ✅ FIX: Handle quota (429) gracefully, don't retry immediately
+                if "429" in error_str or "quota" in error_str.lower():
+                    logger.debug(f"Gemini quota exceeded, skipping")
+                    break  # Skip this key, try next
+                logger.debug(f"Gemini error: {e}")
                 continue
     return None
-
-def call_claude(prompt):
-    if not CLAUDE_KEY:
-        return None
-    try:
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-        response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=2500,
-            temperature=0.4,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text
-    except Exception as e:
-        logger.warning(f"Claude error: {e}")
-        return None
 
 def generate_questions(text, section):
     """
     Generate questions by calling AI providers in order.
-    Order: OpenRouter -> NVIDIA -> Gemini -> Claude
+    Order: OpenRouter -> NVIDIA -> Claude -> Gemini (Gemini last due to quota limits)
     """
     prompt = build_prompt(text, section)
     start_time = time.time()
     
-    # Order of providers to try
+    # ✅ FIXED: Changed order - put Gemini last (it has quota limits)
     providers = [
         ("OpenRouter", call_openrouter),
         ("NVIDIA", call_nvidia),
-        ("Gemini", call_gemini),
-        ("Claude", call_claude)
+        ("Claude", call_claude),
+        ("Gemini", call_gemini)  # Last because free tier has limits
     ]
     
     for provider_name, provider_func in providers:
@@ -337,7 +345,7 @@ def generate_questions(text, section):
                     logger.info(f"✓ Success with {provider_name}: {len(cleaned)} questions generated")
                     return cleaned
         except Exception as e:
-            logger.warning(f"{provider_name} failed: {e}")
+            logger.debug(f"{provider_name} failed: {e}")
             continue
     
     logger.warning("All AI providers failed for this batch")
@@ -440,7 +448,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "AGTA 2026 Engine LIVE – Hardcoded start from page 970"
+    return "AGTA 2026 Engine LIVE – Hardcoded start from page 970 (FIXED)"
 
 @app.route('/health')
 def health():
