@@ -7,45 +7,38 @@ pdf2image==1.17.0
 Pillow==10.4.0
 
 # OCR (Primary + Fallback)
-paddlepaddle==2.6.1
-paddleocr==2.7.3
-easyocr==1.7.1
+paddlepaddle==2.6.2
+paddleocr==2.8.1
+easyocr==1.7.2
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 
-# Old OCR (optional fallback)
-pytesseract==0.3.10
+# Old OCR fallback
+pytesseract==0.3.13
 
 # HTTP / Utils
-requests==2.33.1
-gdown==6.0.0
+requests==2.32.3
+gdown==5.2.0
 beautifulsoup4==4.12.3
 
 # Database
-pymongo==4.7.0
+pymongo==4.10.1
 dnspython==2.6.1
 
 # Google Sheets API
-gspread==6.2.1
+gspread==6.1.2
 oauth2client==4.1.3
 
-# Google APIs
-google-api-core==2.25.2
-google-api-python-client==2.194.0
+# Google APIs (minimal required)
 google-auth==2.29.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.0
-googleapis-common-protos==1.63.2
 
 # AI Providers
-google-generativeai==0.8.4
-anthropic==0.28.0
+google-generativeai==0.8.3
+anthropic==0.40.0
 
-# Optional (OpenRouter support)
-httpx==0.27.0
-
-# Core dependencies
+# Core
 certifi==2025.1.31
 charset-normalizer==3.4.1
 idna==3.10
-rsa==4.9
