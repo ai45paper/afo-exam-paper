@@ -198,14 +198,15 @@ def extract_and_clean_json(raw):
         return None
 
     raw = raw.strip()
-    raw = re.sub(r'^(Here is your JSON:|Here is the JSON array:|```json|```)', '', raw, flags=re.IGNORECASE).strip()
-    raw = re.sub(r'
-```$', '', raw).strip()
+    # ✅ FIX: Using double quotes to prevent 'unterminated string literal' error during copy-paste
+    raw = re.sub(r"^(Here is your JSON:|Here is the JSON array:|```json|```)", "", raw, flags=re.IGNORECASE).strip()
+    raw = re.sub(r"
+```$", "", raw).strip()
 
     try:
         data = json.loads(raw)
     except:
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
         if not match:
             return None
         try:
@@ -217,7 +218,7 @@ def extract_and_clean_json(raw):
     
     def clean_opt(opt):
         opt = str(opt).strip()
-        opt = re.sub(r'^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)', '', opt, flags=re.IGNORECASE)
+        opt = re.sub(r"^(Option\s*\d+\s*:|^\d+\.\s*|^[a-eA-E]\)\s*)", "", opt, flags=re.IGNORECASE)
         return opt.strip()
         
     result = []
