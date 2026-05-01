@@ -108,16 +108,11 @@ sheet = gsheet_client.open_by_key(SHEET_ID).sheet1
 TRACKER_NAME = "pdf_tracker_v2"
 
 def init_tracker():
-    tracker = tracker_col.find_one({"_id": TRACKER_NAME})
-    db_page = tracker.get("current_page", 0) if tracker else 0
-    if db_page > START_PAGE_0BASED:
-        logger.info(f"✅ Resuming from page {db_page+1} (MongoDB)")
-        return db_page
-    else:
-        update_tracker(START_PAGE_0BASED)
-        logger.info(f"🚀 Forced start from page {START_PAGE_1BASED} (hardcoded)")
-        return START_PAGE_0BASED
-
+    # 🔥 Force start from hardcoded page – ignore MongoDB tracker completely
+    force_page = START_PAGE_0BASED   # 974 (0‑based) for page 975
+    update_tracker(force_page)       # overwrite tracker with this value
+    logger.info(f"🚀 FORCED start from page {force_page+1} (hardcoded)")
+    return force_page
 def update_tracker(page_idx):
     tracker_col.update_one({"_id": TRACKER_NAME}, {"$set": {"current_page": page_idx}}, upsert=True)
 
