@@ -238,13 +238,16 @@ def call_openrouter(prompt):
     for key in OPENROUTER_KEYS:
         for model in models:
             try:
-                resp = requests.post(url, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                                     json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
+                resp = requests.post(url, 
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}]}, 
+                    timeout=30)
                 if resp.status_code == 200:
                     return resp.json()["choices"][0]["message"]["content"]
                 if resp.status_code == 429:
                     break
-            except:
+            except Exception as e:
+                logger.warning(f"OpenRouter error: {e}")
                 continue
     return None
 
@@ -255,11 +258,14 @@ def call_nvidia(prompt):
     models = ["nvidia/nemotron-4-340b-instruct", "meta/llama3-70b-instruct"]
     for model in models:
         try:
-            resp = requests.post(url, headers={"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"},
-                                 json={"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout=30)
+            resp = requests.post(url, 
+                headers={"Authorization": f"Bearer {NVIDIA_KEY}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}]}, 
+                timeout=30)
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
-        except:
+        except Exception as e:
+            logger.warning(f"NVIDIA error: {e}")
             continue
     return None
 
@@ -279,6 +285,7 @@ def call_gemini(prompt):
                 if response and response.text:
                     return response.text
             except Exception as e:
+                logger.warning(f"Gemini error: {e}")
                 if "429" in str(e):
                     break  # quota full, try next key
                 continue
@@ -288,7 +295,7 @@ def call_claude(prompt):
     if not CLAUDE_KEY:
         return None
     try:
-        client = anthropic.Anthropic(api_key=CLAUDE_KEY)   # No proxies argument
+        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=2500,
@@ -301,18 +308,38 @@ def call_claude(prompt):
         return None
 
 def generate_questions(text, section):
+    """
+    Generate questions by calling AI providers in order.
+    Order: OpenRouter -> NVIDIA -> Gemini -> Claude
+    """
     prompt = build_prompt(text, section)
     start_time = time.time()
-    # Order: OpenRouter -> NVIDIA -> Gemini -> Claude
-    for func in [call_openrouter, call_nvidia, call_gemini, call_claude]:
+    
+    # Order of providers to try
+    providers = [
+        ("OpenRouter", call_openrouter),
+        ("NVIDIA", call_nvidia),
+        ("Gemini", call_gemini),
+        ("Claude", call_claude)
+    ]
+    
+    for provider_name, provider_func in providers:
         if time.time() - start_time > 60:
             logger.warning("Global timeout (60s) – moving to next batch")
             return None
-        raw = func(prompt)
-        if raw:
-            cleaned = extract_and_clean_json(raw)
-            if cleaned:
-                return cleaned
+        
+        try:
+            logger.info(f"Trying {provider_name}...")
+            raw = provider_func(prompt)
+            if raw:
+                cleaned = extract_and_clean_json(raw)
+                if cleaned:
+                    logger.info(f"✓ Success with {provider_name}: {len(cleaned)} questions generated")
+                    return cleaned
+        except Exception as e:
+            logger.warning(f"{provider_name} failed: {e}")
+            continue
+    
     logger.warning("All AI providers failed for this batch")
     return None
 
@@ -320,10 +347,11 @@ def generate_questions(text, section):
 # GOOGLE SHEETS WRITE WITH RETRY
 # ========================
 def append_to_sheet(rows):
+    """Append rows to Google Sheet with retry logic"""
     for attempt in range(3):
         try:
             sheet.append_rows(rows, value_input_option="RAW")
-            logger.info(f"Appended {len(rows)} rows to Google Sheets")
+            logger.info(f"✓ Appended {len(rows)} rows to Google Sheets")
             return True
         except Exception as e:
             logger.warning(f"Sheets write attempt {attempt+1} failed: {e}")
@@ -336,32 +364,38 @@ def append_to_sheet(rows):
 # ========================
 def main_workflow():
     pdf_path = "book.pdf"
+    
+    # Download PDF if not exists
     if not os.path.exists(pdf_path):
         logger.info("Downloading PDF from Google Drive...")
         try:
             gdown.download(id=DRIVE_FILE_ID, output=pdf_path, quiet=False)
             if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
                 raise Exception("Empty download")
-            logger.info("PDF downloaded")
+            logger.info("✅ PDF downloaded")
         except Exception as e:
             logger.error(f"Download failed: {e}")
             return
 
+    # Get total pages
     with fitz.open(pdf_path) as doc:
         total_pages = doc.page_count
-    logger.info(f"Total PDF pages: {total_pages}")
+    logger.info(f"📄 Total PDF pages: {total_pages}")
 
+    # Initialize tracker and get starting page
     current = init_tracker()
     if current >= total_pages:
         logger.info("Already completed")
         return
 
+    # Process pages in batches
     buffer = []
     while current < total_pages:
         next_page = min(current + 2, total_pages)
         section = get_section(current)
-        logger.info(f"Processing pages {current+1}-{next_page} | {section}")
+        logger.info(f"📖 Processing pages {current+1}-{next_page} | {section}")
 
+        # Extract text from pages
         combined = ""
         with fitz.open(pdf_path) as doc:
             for i in range(current, next_page):
@@ -370,6 +404,7 @@ def main_workflow():
                     combined += page_text + "\n"
         combined = combined[:15000]   # memory safe
 
+        # Generate questions if we have enough text
         if len(combined.strip()) > 50:
             questions = generate_questions(combined, section)
             if questions:
@@ -386,14 +421,17 @@ def main_workflow():
         else:
             logger.warning(f"Insufficient text on pages {current+1}-{next_page}")
 
+        # Update tracker and move to next batch
         update_tracker(next_page)
         current = next_page
         gc.collect()
-        time.sleep(15)   # increased to avoid rate limits
+        time.sleep(15)   # Delay to avoid rate limits
 
+    # Flush remaining buffer
     if buffer:
         append_to_sheet(buffer)
-    logger.info("All pages processed successfully!")
+    
+    logger.info("✅ All pages processed successfully!")
 
 # ========================
 # FLASK SERVER
