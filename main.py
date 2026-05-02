@@ -18,7 +18,7 @@ from threading import Thread
 # ========================
 # CONFIG & START PAGE
 # ========================
-START_PAGE_1BASED = 1010          # HARDCODED START PAGE
+START_PAGE_1BASED = 1020          # HARDCODED START PAGE
 START_PAGE_0BASED = START_PAGE_1BASED - 1
 
 # ========================
@@ -201,14 +201,15 @@ Content to create questions from:
 # ========================
 # JSON CLEANER (ROBUST)
 # ========================
-def extract_and_clean_json(raw):
+def extract_and_clean_json(raw, default_section):
     """Extract and clean JSON from API response."""
     if not raw:
         return None
     
     raw = raw.strip()
     # Remove markdown code blocks
-    raw = re.sub(r'^(?i)(here is your json|```json|```)\s*', '', raw)
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+    raw = re.sub(r"^here is your json\s*", "", raw, flags=re.I)
     raw = re.sub(r'```$', '', raw)
     
     try:
@@ -256,7 +257,7 @@ def extract_and_clean_json(raw):
                     continue
             
             result.append({
-                "section": str(item.get("section", "")).strip() or section,
+                "section": str(item.get("section", "")).strip() or default_section,
                 "question": q,
                 "opt1": opt1, "opt2": opt2, "opt3": opt3, "opt4": opt4, "opt5": opt5,
                 "answer": ans,
@@ -293,7 +294,7 @@ def call_openrouter(prompt):
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 2000,
+                        "max_tokens": 900,
                         "temperature": 0.3
                     },
                     timeout=60
@@ -377,7 +378,7 @@ def call_nvidia(prompt):
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 2000,
+                        "max_tokens": 900,
                         "temperature": 0.3
                     },
                     timeout=60
@@ -426,7 +427,7 @@ def generate_questions(text, section):
                 
                 if raw:
                     logger.info(f"   Raw response (first 200 chars): {raw[:200]}")
-                    cleaned = extract_and_clean_json(raw)
+                    cleaned = extract_and_clean_json(raw, section)
                     
                     if cleaned:
                         logger.info(f"✅ {provider_name} SUCCESS: {len(cleaned)} questions generated")
